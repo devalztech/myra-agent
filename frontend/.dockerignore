@@ -1,0 +1,12 @@
+node_modules
+dist
+.output
+.wrangler
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+.lovable
