@@ -1,43 +1,75 @@
-import type { ChatSession } from "@/types";
-// import { apiRequest } from "./client";
+import type { ChatResponse, ChatSession, ModelStatus, SessionSummary } from "@/types";
+import { apiRequest, apiStream, type SseEvent } from "./client";
 
-/** Mock session data — replaced by GET /sessions when the backend lands. */
-export const mockSessions: ChatSession[] = [
-  {
-    id: "s1",
-    title: "Refactor auth middleware",
-    updatedAt: "2m ago",
-    messages: [
-      {
-        id: "m1",
-        role: "user",
-        content: "Split the auth middleware into a reusable dependency.",
-        createdAt: "2m ago",
-      },
-      {
-        id: "m2",
-        role: "assistant",
-        content:
-          "I'd extract the token parsing into `get_current_user` and keep route handlers free of auth logic. Want me to sketch the module layout first?",
-        createdAt: "2m ago",
-      },
-    ],
-  },
-  {
-    id: "s2",
-    title: "Dockerfile for Render",
-    updatedAt: "1h ago",
-    messages: [],
-  },
-  {
-    id: "s3",
-    title: "Vite build size audit",
-    updatedAt: "Yesterday",
-    messages: [],
-  },
-];
+export function fetchSessions(token: string): Promise<SessionSummary[]> {
+  return apiRequest<SessionSummary[]>("/sessions", { token });
+}
 
-export async function fetchSessions(): Promise<ChatSession[]> {
-  // return apiRequest<ChatSession[]>("/sessions");
-  return mockSessions;
+export function fetchSession(token: string, id: string): Promise<ChatSession> {
+  return apiRequest<ChatSession>(`/sessions/${id}`, { token });
+}
+
+export function createSession(token: string, title?: string): Promise<ChatSession> {
+  return apiRequest<ChatSession>("/sessions", {
+    method: "POST",
+    token,
+    body: { title: title ?? null },
+  });
+}
+
+export function renameSession(token: string, id: string, title: string): Promise<SessionSummary> {
+  return apiRequest<SessionSummary>(`/sessions/${id}`, {
+    method: "PATCH",
+    token,
+    body: { title },
+  });
+}
+
+export function deleteSession(token: string, id: string): Promise<void> {
+  return apiRequest<void>(`/sessions/${id}`, { method: "DELETE", token });
+}
+
+/** Non-streaming fallback. */
+export function sendMessage(token: string, id: string, content: string): Promise<ChatResponse> {
+  return apiRequest<ChatResponse>(`/sessions/${id}/chat`, {
+    method: "POST",
+    token,
+    body: { content },
+  });
+}
+
+export type StreamHandlers = {
+  onSession?: (session: { id: string; title: string }) => void;
+  onToken?: (token: string) => void;
+  onDone?: (assistant: { id: string; content: string; createdAt: string }) => void;
+  onError?: (message: string) => void;
+};
+
+export async function streamMessage(
+  token: string,
+  id: string,
+  content: string,
+  handlers: StreamHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  await apiStream(
+    `/sessions/${id}/chat/stream`,
+    { token, body: { content }, ...(signal ? { signal } : {}) },
+    ({ event, data }: SseEvent) => {
+      const payload = data as Record<string, string>;
+      if (event === "session") handlers.onSession?.({ id: payload["id"]!, title: payload["title"]! });
+      else if (event === "token") handlers.onToken?.(payload["token"] ?? "");
+      else if (event === "assistant_message")
+        handlers.onDone?.({
+          id: payload["id"]!,
+          content: payload["content"] ?? "",
+          createdAt: payload["createdAt"]!,
+        });
+      else if (event === "error") handlers.onError?.(payload["message"] ?? "Inference failed.");
+    },
+  );
+}
+
+export function fetchModelStatus(): Promise<ModelStatus> {
+  return apiRequest<ModelStatus>("/model");
 }

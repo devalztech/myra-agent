@@ -1,4 +1,4 @@
-/** Shared types for future FastAPI responses. */
+/** Shared types matching the FastAPI backend schemas. */
 
 export type User = {
   id: string;
@@ -22,7 +22,7 @@ export type RegisterPayload = {
   password: string;
 };
 
-export type ChatRole = "user" | "assistant";
+export type ChatRole = "user" | "assistant" | "system";
 
 export type ChatMessage = {
   id: string;
@@ -31,9 +31,28 @@ export type ChatMessage = {
   createdAt: string;
 };
 
-export type ChatSession = {
+/** Sidebar row — no messages loaded. */
+export type SessionSummary = {
   id: string;
   title: string;
   updatedAt: string;
+};
+
+export type ChatSession = SessionSummary & {
   messages: ChatMessage[];
+};
+
+export type ChatResponse = {
+  session: SessionSummary;
+  userMessage: ChatMessage;
+  assistantMessage: ChatMessage;
+};
+
+export type ModelStatus = {
+  backend: string;
+  model: string | null;
+  loaded: boolean;
+  contextSize: number;
+  ramGb: number;
+  tier: string;
 };

@@ -1,8 +1,9 @@
 import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 
 import { login } from "@/api/auth";
 import { AuthLayout, Field } from "@/components/myra/auth-layout";
+import { useAuth } from "@/lib/auth";
 
 export const Route = createFileRoute("/login")({
   head: () => ({
@@ -21,17 +22,23 @@ export const Route = createFileRoute("/login")({
 
 function LoginPage() {
   const navigate = useNavigate();
+  const { signIn, token, ready } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (ready && token) navigate({ to: "/chat" });
+  }, [ready, token, navigate]);
 
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
     setError(null);
     setLoading(true);
     try {
-      await login({ email, password });
+      const auth = await login({ email, password });
+      signIn(auth);
       navigate({ to: "/chat" });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to log in.");
@@ -56,7 +63,8 @@ function LoginPage() {
       <form onSubmit={handleSubmit} className="space-y-5">
         <Field
           id="email"
-          label="Email or username"
+          label="Email"
+          type="email"
           value={email}
           onChange={setEmail}
           autoComplete="username"

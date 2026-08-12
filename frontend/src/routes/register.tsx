@@ -1,8 +1,9 @@
 import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 
 import { register } from "@/api/auth";
 import { AuthLayout, Field } from "@/components/myra/auth-layout";
+import { useAuth } from "@/lib/auth";
 
 export const Route = createFileRoute("/register")({
   head: () => ({
@@ -24,12 +25,17 @@ export const Route = createFileRoute("/register")({
 
 function RegisterPage() {
   const navigate = useNavigate();
+  const { signIn, token, ready } = useAuth();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (ready && token) navigate({ to: "/chat" });
+  }, [ready, token, navigate]);
 
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
@@ -38,9 +44,14 @@ function RegisterPage() {
       setError("Passwords do not match.");
       return;
     }
+    if (password.length < 6) {
+      setError("Password must be at least 6 characters.");
+      return;
+    }
     setLoading(true);
     try {
-      await register({ name, email, password });
+      const auth = await register({ name, email, password });
+      signIn(auth);
       navigate({ to: "/chat" });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to register.");
@@ -66,7 +77,8 @@ function RegisterPage() {
         <Field id="name" label="Name" value={name} onChange={setName} autoComplete="name" />
         <Field
           id="email"
-          label="Email or username"
+          label="Email"
+          type="email"
           value={email}
           onChange={setEmail}
           autoComplete="username"
