@@ -10,7 +10,10 @@ export const Route = createFileRoute("/login")({
       { title: "Log in — Myra" },
       { name: "description", content: "Log in to your Myra workspace and continue building." },
       { property: "og:title", content: "Log in — Myra" },
-      { property: "og:description", content: "Log in to your Myra workspace and continue building." },
+      {
+        property: "og:description",
+        content: "Log in to your Myra workspace and continue building.",
+      },
     ],
   }),
   component: LoginPage,

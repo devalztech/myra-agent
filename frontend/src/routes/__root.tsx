@@ -81,10 +81,12 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { name: "description", content: "Myra is a personal AI coding agent. Think. Build. Ship." },
       { name: "author", content: "Myra" },
       { property: "og:title", content: "Myra — AI coding agent" },
-      { property: "og:description", content: "Myra is a personal AI coding agent. Think. Build. Ship." },
+      {
+        property: "og:description",
+        content: "Myra is a personal AI coding agent. Think. Build. Ship.",
+      },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
-
     ],
     links: [
       {

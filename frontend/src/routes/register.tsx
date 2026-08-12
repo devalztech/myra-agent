@@ -8,7 +8,10 @@ export const Route = createFileRoute("/register")({
   head: () => ({
     meta: [
       { title: "Create your Myra account" },
-      { name: "description", content: "Create a Myra account to start building with your AI coding agent." },
+      {
+        name: "description",
+        content: "Create a Myra account to start building with your AI coding agent.",
+      },
       { property: "og:title", content: "Create your Myra account" },
       {
         property: "og:description",

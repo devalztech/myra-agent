@@ -12,4 +12,9 @@ export default defineConfig({
     // nitro/vite builds from this
     server: { entry: "server" },
   },
+  // Render (and any plain Docker host) runs Node, not a Cloudflare Worker.
+  // The node-server preset emits a standalone server at .output/server/index.mjs
+  // that serves .output/public and listens on $PORT.
+  // Inside Lovable, LOVABLE_NITRO_PRESET still pins the Cloudflare build.
+  nitro: { preset: "node-server" },
 });

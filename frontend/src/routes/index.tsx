@@ -10,12 +10,14 @@ export const Route = createFileRoute("/")({
       { title: "Myra — Your AI coding agent" },
       {
         name: "description",
-        content: "Myra is a personal AI coding agent. Think, build and ship from one clean workspace.",
+        content:
+          "Myra is a personal AI coding agent. Think, build and ship from one clean workspace.",
       },
       { property: "og:title", content: "Myra — Your AI coding agent" },
       {
         property: "og:description",
-        content: "Myra is a personal AI coding agent. Think, build and ship from one clean workspace.",
+        content:
+          "Myra is a personal AI coding agent. Think, build and ship from one clean workspace.",
       },
     ],
   }),

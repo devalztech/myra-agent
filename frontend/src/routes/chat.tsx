@@ -11,7 +11,10 @@ export const Route = createFileRoute("/chat")({
   head: () => ({
     meta: [
       { title: "Sessions — Myra" },
-      { name: "description", content: "Your Myra coding sessions and agent conversation workspace." },
+      {
+        name: "description",
+        content: "Your Myra coding sessions and agent conversation workspace.",
+      },
       { property: "og:title", content: "Sessions — Myra" },
       {
         property: "og:description",

@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: myra-frontend
+    runtime: docker
+    rootDir: frontend
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: PORT
+        value: 3000
+      - key: VITE_API_URL
+        sync: false
