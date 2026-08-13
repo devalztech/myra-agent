@@ -60,3 +60,57 @@ export type ModelStatus = {
   detail?: string | null;
   threads?: number;
 };
+
+// --------------------------------------------------------------------------
+// agent
+// --------------------------------------------------------------------------
+
+export type ProviderInfo = {
+  id: string;
+  name: string;
+  kind: "local" | "remote" | "mock" | string;
+  model: string | null;
+  available: boolean;
+  detail: string | null;
+};
+
+export type AgentLimits = {
+  maxToolCalls: number;
+  maxSteps: number;
+  toolTimeoutSeconds: number;
+  agentTimeoutSeconds: number;
+};
+
+export type AgentSettings = {
+  provider: string;
+  approvalRequired: boolean;
+  maxToolCalls: number;
+  agentMode: boolean;
+  limits: AgentLimits;
+};
+
+/** Raw SSE frame from `POST /sessions/{id}/agent`. */
+export type AgentEvent = {
+  type: string;
+  [key: string]: unknown;
+};
+
+export type ActivityStatus = "pending" | "running" | "done" | "error" | "blocked";
+
+export type ActivityStep = {
+  id: string;
+  label: string;
+  detail?: string;
+  status: ActivityStatus;
+};
+
+/** An assistant turn plus the agent steps that produced it. */
+export type Turn = {
+  message: ChatMessage;
+  steps?: ActivityStep[];
+};
+
+export type WorkspaceInfo = {
+  root?: string;
+  [key: string]: unknown;
+};

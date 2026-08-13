@@ -172,13 +172,17 @@ def run_agent(
     }
     session_out = {"id": chat_session.id, "title": chat_session.title}
     budget = RunBudget(max_tool_calls=row.max_tool_calls or settings.max_tool_calls)
+    # Scalars must be read while the request-scoped session is still open: the
+    # ORM instances detach once the generator starts streaming.
+    user_id = user.id
 
     def stream() -> Iterator[str]:
         # A fresh DB session: the request-scoped one closes when the generator
         # starts streaming outside the dependency scope.
         local_db = SessionLocal()
         try:
-            memory = MemoryStore(db=local_db, user_id=user.id)
+            memory = MemoryStore(db=local_db, user_id=user_id)
+
             runner = AgentRunner(
                 provider=get_provider(provider_id),
                 memory=memory,
