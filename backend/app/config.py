@@ -98,15 +98,38 @@ class Settings:
         self.model_repo = _env("MYRA_MODEL_REPO")  # HF repo id override
         self.model_file = _env("MYRA_MODEL_FILE")  # HF filename override
         self.context_size = _env_int("MYRA_CONTEXT_SIZE", 0)  # 0 -> auto from tier
-        self.max_tokens = _env_int("MYRA_MAX_TOKENS", 1024)
+        self.max_tokens = _env_int("MYRA_MAX_TOKENS", 512)
         self.temperature = _env_float("MYRA_TEMPERATURE", 0.4)
         self.top_p = _env_float("MYRA_TOP_P", 0.95)
         self.gpu_layers = _env_int("MYRA_GPU_LAYERS", 0)
-        self.threads = _env_int("MYRA_THREADS", 0) or (os.cpu_count() or 4)
+        # Thread count. llama.cpp scales NEGATIVELY once you ask for more
+        # threads than the container is actually allowed to run: on a panel
+        # limited to 200% CPU (2 cores) sitting on a 64-core host,
+        # os.cpu_count() / sched_getaffinity() both report 64, so llama.cpp
+        # spawns 64 workers that the cgroup then throttles — the same 3B
+        # model measured 5.4 tok/s at the right thread count and 0.25 tok/s
+        # oversubscribed. _auto_threads() now reads the cgroup CPU quota so
+        # the default matches the real allowance.
+        self.threads = _env_int("MYRA_THREADS", 0) or self._auto_threads()
+        # Prompt-ingest batch. Bigger = faster prefill, more RAM. On a
+        # 1-2 core panel a huge batch just costs RAM, so scale it with the
+        # thread count instead of always using 512.
+        self.batch_size = _env_int("MYRA_BATCH_SIZE", 0) or (256 if self.threads <= 2 else 512)
+        # Explicit tier override ("nano" | "compact" | "standard" | ...).
+        self.model_tier = _env("MYRA_MODEL_TIER").lower()
+        # Never auto-select a model bigger than this many GB of weights.
+        # Huge models fit in RAM but are unusably slow on CPU-only panels.
+        self.max_auto_model_gb = _env_float("MYRA_MAX_AUTO_MODEL_GB", 8.0)
         # Reserve RAM (GB) for the OS/API when picking a model tier.
         self.ram_reserve_gb = _env_float("MYRA_RAM_RESERVE_GB", 1.5)
         self.ram_override_gb = _env_float("MYRA_RAM_GB", 0.0)
-        self.preload_model = _env_bool("MYRA_PRELOAD_MODEL", False)
+        # Preload the model at boot (in a background thread) so the first
+        # chat message isn't stuck behind a cold model load.
+        self.preload_model = _env_bool("MYRA_PRELOAD_MODEL", True)
+        # Keep the model resident between requests (mmap on, mlock off by
+        # default so a small panel can still page weights out under pressure).
+        self.use_mmap = _env_bool("MYRA_USE_MMAP", True)
+        self.use_mlock = _env_bool("MYRA_USE_MLOCK", False)
 
         self.history_window = _env_int("MYRA_HISTORY_WINDOW", 20)
 
@@ -121,6 +144,48 @@ class Settings:
         # boot instead of waiting for the first log line from cloudflared.
         self.public_api_url = _env("PUBLIC_API_URL")
         self.skip_tunnel = _env_bool("MYRA_SKIP_TUNNEL", False)
+
+    @staticmethod
+    def _cgroup_cpu_quota() -> float | None:
+        """CPU cores this container may actually use, from the cgroup.
+
+        Pterodactyl/HidenCloud express the limit as a percentage (200% = 2
+        cores) which lands in the kernel as a cfs quota/period pair.
+        """
+        # cgroup v2: "<quota> <period>" or "max <period>"
+        try:
+            raw = Path("/sys/fs/cgroup/cpu.max").read_text().strip().split()
+            if len(raw) == 2 and raw[0] != "max":
+                quota, period = float(raw[0]), float(raw[1])
+                if quota > 0 and period > 0:
+                    return quota / period
+        except (OSError, ValueError):
+            pass
+        # cgroup v1
+        try:
+            quota = float(Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").read_text().strip())
+            period = float(Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us").read_text().strip())
+            if quota > 0 and period > 0:
+                return quota / period
+        except (OSError, ValueError):
+            pass
+        return None
+
+    @classmethod
+    def _auto_threads(cls) -> int:
+        try:
+            available = float(len(os.sched_getaffinity(0)))
+        except AttributeError:
+            available = float(os.cpu_count() or 4)
+
+        quota = cls._cgroup_cpu_quota()
+        if quota and quota > 0:
+            available = min(available, quota)
+
+        # Round down (2.0 cores -> 2 threads); never below 1, never above 16
+        # because llama.cpp stops scaling on shared/virtualised CPUs there.
+        return max(1, min(int(available), 16))
+
 
     def _resolve_database_url(self) -> str:
         url = _env("DATABASE_URL") or _env("MYRA_DATABASE_URL")

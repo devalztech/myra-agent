@@ -265,11 +265,25 @@ async def lifespan(_app: FastAPI):
     logger.info("Detected RAM: %.2f GB -> tier '%s' (%s)", ram, tier.name, tier.description)
     _start_cloudflare_tunnel(settings.port)
     if settings.preload_model:
-        engine = get_engine()
-        try:
-            engine.load()  # type: ignore[attr-defined]
-        except Exception as exc:  # pragma: no cover
-            logger.warning("Model preload skipped: %s", exc)
+        # Load in a daemon thread so boot (and /health) never blocks on a
+        # multi-GB model load or download, while still making sure the first
+        # real chat message doesn't pay the cold-start cost.
+        import threading as _threading
+
+        def _preload() -> None:
+            try:
+                engine = get_engine()
+                loader = getattr(engine, "load", None)
+                if callable(loader):
+                    import time as _time
+
+                    started = _time.time()
+                    loader()
+                    logger.info("Model preloaded in %.1fs", _time.time() - started)
+            except Exception as exc:  # pragma: no cover
+                logger.warning("Model preload skipped: %s", exc)
+
+        _threading.Thread(target=_preload, daemon=True, name="myra-preload").start()
     yield
 
 

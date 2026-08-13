@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -42,6 +43,15 @@ class BaseEngine:
     @property
     def loaded(self) -> bool:
         return False
+
+    @property
+    def status(self) -> str:
+        """One of: idle | downloading | loading | ready | error."""
+        return "ready" if self.loaded else "idle"
+
+    @property
+    def detail(self) -> str | None:
+        return None
 
     @property
     def context_size(self) -> int:
@@ -88,7 +98,19 @@ class LlamaCppEngine(BaseEngine):
         super().__init__()
         self._llm = None
         self._lock = threading.Lock()  # llama.cpp contexts are not thread-safe
+        self._load_lock = threading.Lock()
         self._model_path: Path | None = None
+        self._status = "idle"
+        self._detail: str | None = None
+
+    # -- observable state ----------------------------------------------
+    @property
+    def status(self) -> str:
+        return self._status
+
+    @property
+    def detail(self) -> str | None:
+        return self._detail
 
     # -- model file ----------------------------------------------------
     def resolve_model_path(self, download: bool = True) -> Path:
@@ -107,6 +129,7 @@ class LlamaCppEngine(BaseEngine):
         # Any already-present .gguf beats a multi-GB download.
         existing = sorted(settings.models_dir.glob("*.gguf"))
         if existing:
+            logger.info("Using already-downloaded model %s", existing[0].name)
             return existing[0]
 
         if not download:
@@ -121,37 +144,71 @@ class LlamaCppEngine(BaseEngine):
             raise LLMUnavailable("huggingface_hub is not installed.") from exc
 
         logger.info("Downloading %s/%s ...", repo_id, filename)
-        downloaded = hf_hub_download(
-            repo_id=repo_id,
-            filename=filename,
-            local_dir=str(settings.models_dir),
-        )
+        self._status = "downloading"
+        self._detail = f"Downloading {filename} (~{_tier.size_gb:.1f} GB)"
+        try:
+            downloaded = hf_hub_download(
+                repo_id=repo_id,
+                filename=filename,
+                local_dir=str(settings.models_dir),
+            )
+        except Exception as exc:
+            self._status = "error"
+            self._detail = f"Model download failed: {exc}"
+            raise LLMUnavailable(self._detail) from exc
         return Path(downloaded)
 
     # -- lifecycle -----------------------------------------------------
     def load(self) -> None:
         if self._llm is not None:
             return
-        with self._lock:
+        with self._load_lock:
             if self._llm is not None:
                 return
             try:
                 from llama_cpp import Llama
             except ImportError as exc:
+                self._status = "error"
+                self._detail = "llama-cpp-python is not installed."
                 raise LLMUnavailable(
                     "llama-cpp-python is not installed. Run scripts/install.sh."
                 ) from exc
 
             path = self.resolve_model_path()
+            self._status = "loading"
+            self._detail = f"Loading {path.name}"
             logger.info("Loading local model: %s", path)
-            self._llm = Llama(
-                model_path=str(path),
-                n_ctx=self.context_size,
-                n_threads=settings.threads,
-                n_gpu_layers=settings.gpu_layers,
-                verbose=settings.debug,
+            logger.info(
+                "llama.cpp params: n_ctx=%s n_threads=%s n_batch=%s n_gpu_layers=%s",
+                self.context_size,
+                settings.threads,
+                settings.batch_size,
+                settings.gpu_layers,
             )
+            started = time.time()
+            try:
+                self._llm = Llama(
+                    model_path=str(path),
+                    n_ctx=self.context_size,
+                    n_threads=settings.threads,
+                    # Prompt ingest runs wider than generation; both are capped
+                    # by settings.threads so we never oversubscribe the CPU.
+                    n_threads_batch=settings.threads,
+                    n_batch=settings.batch_size,
+                    n_gpu_layers=settings.gpu_layers,
+                    use_mmap=settings.use_mmap,
+                    use_mlock=settings.use_mlock,
+                    verbose=settings.debug,
+                )
+            except Exception as exc:
+                self._status = "error"
+                self._detail = f"Failed to load {path.name}: {exc}"
+                logger.exception("Model load failed")
+                raise LLMUnavailable(self._detail) from exc
             self._model_path = path
+            self._status = "ready"
+            self._detail = None
+            logger.info("Model ready in %.1fs (%s)", time.time() - started, path.name)
 
     @property
     def model_name(self) -> str | None:
@@ -210,7 +267,41 @@ def reset_engine() -> None:
         _engine = None
 
 
+def _approx_tokens(text: str) -> int:
+    """Cheap token estimate (~4 chars/token) — no tokenizer needed."""
+    return max(1, len(text) // 4)
+
+
 def build_messages(history: list[Message], user_content: str) -> list[Message]:
+    """System prompt + a trimmed history window + the new user message.
+
+    History is trimmed by *both* message count and an approximate token
+    budget. Without the token budget a few long pasted snippets can overflow
+    the context window, which makes llama.cpp re-ingest (or truncate) the
+    whole prompt on every turn — the single biggest cause of a chat that
+    gets slower and slower the longer it runs.
+    """
     window = settings.history_window
-    trimmed = history[-window:] if window > 0 else history
-    return [{"role": "system", "content": SYSTEM_PROMPT}, *trimmed, {"role": "user", "content": user_content}]
+    trimmed = list(history[-window:] if window > 0 else history)
+
+    engine = get_engine()
+    # Leave room for the reply and the system prompt.
+    budget = max(
+        512,
+        engine.context_size - settings.max_tokens - _approx_tokens(SYSTEM_PROMPT) - 64,
+    )
+    used = _approx_tokens(user_content)
+    kept: list[Message] = []
+    for message in reversed(trimmed):
+        cost = _approx_tokens(message.get("content", ""))
+        if used + cost > budget:
+            break
+        used += cost
+        kept.append(message)
+    kept.reverse()
+
+    return [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        *kept,
+        {"role": "user", "content": user_content},
+    ]

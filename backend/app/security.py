@@ -11,13 +11,25 @@ import jwt
 from .config import settings
 
 
+# bcrypt hard-limits the input to 72 bytes and bcrypt>=4.1 raises
+# ValueError instead of silently truncating. The register schema allows a
+# 128-character password, so a long passphrase (or a shorter one with
+# multi-byte characters) used to crash registration with a 500. Truncate
+# on the way in — consistently for both hashing and verification.
+_BCRYPT_MAX_BYTES = 72
+
+
+def _prepare(password: str) -> bytes:
+    return password.encode("utf-8")[:_BCRYPT_MAX_BYTES]
+
+
 def hash_password(password: str) -> str:
-    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    return bcrypt.hashpw(_prepare(password), bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(password: str, password_hash: str) -> bool:
     try:
-        return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
+        return bcrypt.checkpw(_prepare(password), password_hash.encode("utf-8"))
     except (ValueError, TypeError):
         return False
 

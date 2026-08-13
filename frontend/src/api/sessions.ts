@@ -40,6 +40,8 @@ export function sendMessage(token: string, id: string, content: string): Promise
 
 export type StreamHandlers = {
   onSession?: (session: { id: string; title: string }) => void;
+  /** Emitted before the first token while the local model is still loading. */
+  onStatus?: (status: { state: string; message: string }) => void;
   onToken?: (token: string) => void;
   onDone?: (assistant: { id: string; content: string; createdAt: string }) => void;
   onError?: (message: string) => void;
@@ -59,6 +61,11 @@ export async function streamMessage(
       const payload = data as Record<string, string>;
       if (event === "session") handlers.onSession?.({ id: payload["id"]!, title: payload["title"]! });
       else if (event === "token") handlers.onToken?.(payload["token"] ?? "");
+      else if (event === "status")
+        handlers.onStatus?.({
+          state: payload["state"] ?? "loading",
+          message: payload["message"] ?? "Preparing the local model…",
+        });
       else if (event === "assistant_message")
         handlers.onDone?.({
           id: payload["id"]!,

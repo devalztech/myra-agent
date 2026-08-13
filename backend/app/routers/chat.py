@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..database import SessionLocal, get_db
 from ..deps import get_current_user, get_owned_session
 from ..llm.engine import LLMUnavailable, build_messages, get_engine
@@ -52,6 +53,9 @@ def model_status() -> ModelStatus:
         contextSize=engine.context_size,
         ramGb=engine.ram_gb,
         tier=engine.tier.name,
+        status=engine.status,
+        detail=engine.detail,
+        threads=settings.threads,
     )
 
 
@@ -132,6 +136,16 @@ def chat_stream(
         yield _sse("user_message", user_message_payload)
 
         engine = get_engine()
+        if not engine.loaded:
+            # First message after a cold boot can sit for a while behind a
+            # model download/load. Tell the UI instead of looking frozen.
+            yield _sse(
+                "status",
+                {
+                    "state": engine.status,
+                    "message": engine.detail or "Preparing the local model…",
+                },
+            )
         pieces: list[str] = []
         try:
             for token in engine.stream(build_messages(history, payload.content)):

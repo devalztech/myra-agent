@@ -46,6 +46,7 @@ function ChatPage() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [model, setModel] = useState<ModelStatus | null>(null);
+  const [warmup, setWarmup] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // --- guard ----------------------------------------------------------
@@ -66,13 +67,39 @@ function ChatPage() {
       .catch((err: unknown) =>
         setError(err instanceof Error ? err.message : "Could not load sessions."),
       );
-    fetchModelStatus()
-      .then((status) => !cancelled && setModel(status))
-      .catch(() => undefined);
     return () => {
       cancelled = true;
     };
   }, [token]);
+
+  // --- model readiness --------------------------------------------------
+  // The local model can still be downloading/loading right after a cold
+  // boot. Poll until it reports "ready" so the composer can explain a slow
+  // first reply instead of just looking frozen.
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const poll = () => {
+      fetchModelStatus()
+        .then((status) => {
+          if (cancelled) return;
+          setModel(status);
+          if (status.status && status.status !== "ready" && status.status !== "error") {
+            timer = setTimeout(poll, 4000);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) timer = setTimeout(poll, 8000);
+        });
+    };
+    poll();
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, []);
 
   // --- load the active conversation ------------------------------------
   useEffect(() => {
@@ -161,7 +188,11 @@ function ChatPage() {
       await streamMessage(token, sessionId, content, {
         onSession: ({ id, title }) =>
           setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, title } : s))),
-        onToken: (piece) => setStreaming((prev) => prev + piece),
+        onStatus: ({ message }) => setWarmup(message),
+        onToken: (piece) => {
+          setWarmup(null);
+          setStreaming((prev) => prev + piece);
+        },
         onDone: (assistant) => {
           setStreaming("");
           setMessages((prev) => [
@@ -185,6 +216,7 @@ function ChatPage() {
       setDraft(content);
     } finally {
       setStreaming("");
+      setWarmup(null);
       setSending(false);
     }
   };
@@ -259,6 +291,8 @@ function ChatPage() {
         {model && (
           <p className="px-2 pb-3 text-xs text-muted-foreground">
             {model.model ?? "no model"} · {model.tier} · {model.ramGb} GB RAM
+            {model.threads ? ` · ${model.threads} threads` : ""}
+            {model.status && model.status !== "ready" ? ` · ${model.status}` : ""}
           </p>
         )}
         <div className="flex items-center gap-2">
@@ -351,7 +385,9 @@ function ChatPage() {
                   </li>
                 )}
                 {sending && !streaming && (
-                  <li className="text-sm text-muted-foreground">Myra is thinking…</li>
+                  <li className="text-sm text-muted-foreground">
+                    {warmup ?? "Myra is thinking…"}
+                  </li>
                 )}
               </ul>
             )}
@@ -365,6 +401,14 @@ function ChatPage() {
         </div>
 
         <div className="px-5 pb-8">
+          {model && model.status && model.status !== "ready" && (
+            <p className="mx-auto mb-3 w-full max-w-3xl rounded-lg border border-border bg-secondary px-4 py-2.5 text-xs text-muted-foreground">
+              {model.status === "error"
+                ? (model.detail ?? "The local model could not be loaded.")
+                : (model.detail ??
+                  "Preparing the local model — your first reply may take a moment.")}
+            </p>
+          )}
           <form onSubmit={handleSend} className="mx-auto w-full max-w-3xl">
             <label htmlFor="chat-input" className="sr-only">
               Message Myra

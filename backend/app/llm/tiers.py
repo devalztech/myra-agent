@@ -1,7 +1,20 @@
 """RAM-aware model tier selection.
 
 Myra only runs local Llama-family GGUF models — no external agentic APIs.
-The largest model that comfortably fits in the panel's RAM is selected.
+The largest model that *actually fits and stays fast* on the panel is
+selected. "Fits" means both:
+
+  * the quantised weights fit in usable RAM alongside the KV cache and the
+    Python/API process itself, and
+  * the weights are under the speed cap (MYRA_MAX_AUTO_MODEL_GB), because a
+    model can fit in RAM and still be unusably slow on a CPU-only panel.
+
+This used to only compare a hand-written ``min_ram_gb`` per tier and fall
+back to the *first* tier when nothing matched — which meant a 3 GB panel got
+the 3B/2 GB "compact" model. With 1.5 GB reserved for the OS + API that model
+does not fit at all, so the process either got OOM-killed or thrashed swap at
+well under 1 token/second. A "nano" 1B tier is now the floor, and selection
+checks the real weight size against usable RAM.
 """
 
 from __future__ import annotations
@@ -19,34 +32,47 @@ class ModelTier:
     repo_id: str
     filename: str
     min_ram_gb: float  # usable RAM required (after the reserve)
+    size_gb: float  # approximate on-disk weight size
     context_size: int
     description: str
 
 
-# Ordered small -> large. Selection picks the last tier that fits.
+# Ordered small -> large. Selection picks the largest tier that fits.
 TIERS: tuple[ModelTier, ...] = (
+    ModelTier(
+        name="nano",
+        repo_id="bartowski/Llama-3.2-1B-Instruct-GGUF",
+        filename="Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+        min_ram_gb=1.2,
+        size_gb=0.81,
+        context_size=4096,
+        description="Llama 3.2 1B Instruct (Q4_K_M) — small/low-RAM panel, fastest",
+    ),
     ModelTier(
         name="compact",
         repo_id="bartowski/Llama-3.2-3B-Instruct-GGUF",
         filename="Llama-3.2-3B-Instruct-Q4_K_M.gguf",
-        min_ram_gb=3.0,
-        context_size=8192,
-        description="Llama 3.2 3B Instruct (Q4_K_M) — minimum viable panel",
+        min_ram_gb=2.8,
+        size_gb=2.02,
+        context_size=4096,
+        description="Llama 3.2 3B Instruct (Q4_K_M) — mid panel",
     ),
     ModelTier(
         name="standard",
         repo_id="bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
         filename="Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
-        min_ram_gb=7.0,
-        context_size=16384,
+        min_ram_gb=6.5,
+        size_gb=4.92,
+        context_size=8192,
         description="Llama 3.1 8B Instruct (Q4_K_M) — balanced default",
     ),
     ModelTier(
         name="quality",
         repo_id="bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
         filename="Meta-Llama-3.1-8B-Instruct-Q6_K.gguf",
-        min_ram_gb=11.0,
-        context_size=32768,
+        min_ram_gb=9.0,
+        size_gb=6.6,
+        context_size=8192,
         description="Llama 3.1 8B Instruct (Q6_K) — higher fidelity",
     ),
     ModelTier(
@@ -54,7 +80,8 @@ TIERS: tuple[ModelTier, ...] = (
         repo_id="bartowski/Llama-3.3-70B-Instruct-GGUF",
         filename="Llama-3.3-70B-Instruct-Q3_K_M.gguf",
         min_ram_gb=38.0,
-        context_size=32768,
+        size_gb=34.0,
+        context_size=8192,
         description="Llama 3.3 70B Instruct (Q3_K_M) — large panel",
     ),
     ModelTier(
@@ -62,10 +89,13 @@ TIERS: tuple[ModelTier, ...] = (
         repo_id="bartowski/Llama-3.3-70B-Instruct-GGUF",
         filename="Llama-3.3-70B-Instruct-Q5_K_M.gguf",
         min_ram_gb=56.0,
-        context_size=32768,
+        size_gb=50.0,
+        context_size=8192,
         description="Llama 3.3 70B Instruct (Q5_K_M) — high-memory panel",
     ),
 )
+
+TIERS_BY_NAME = {tier.name: tier for tier in TIERS}
 
 
 def _cgroup_limit_bytes() -> float | None:
@@ -109,12 +139,41 @@ def detect_total_ram_gb() -> float:
     return round(min(limits) / (1024**3), 2)
 
 
+def kv_cache_gb(context_size: int) -> float:
+    """Rough KV-cache footprint for a Llama-class model at this context.
+
+    ~0.13 GB per 4k of context for the small models, which is close enough
+    to keep a 3 GB panel from over-committing.
+    """
+    return 0.13 * (context_size / 4096)
+
+
 def select_tier(total_ram_gb: float | None = None) -> ModelTier:
+    """Pick the largest tier that fits BOTH RAM and the speed budget.
+
+    An explicit MYRA_MODEL_TIER always wins. Otherwise selection is capped by
+    MYRA_MAX_AUTO_MODEL_GB (default 8 GB of weights): a 70B model technically
+    "fits" in 250 GB of RAM but generates well under 1 token/second on CPU,
+    which reads as a broken chat to the user. Raise the cap deliberately if
+    you have GPU offload configured.
+    """
+    forced = getattr(settings, "model_tier", "")
+    if forced and forced in TIERS_BY_NAME:
+        return TIERS_BY_NAME[forced]
+
     total = detect_total_ram_gb() if total_ram_gb is None else total_ram_gb
     usable = max(total - settings.ram_reserve_gb, 0.0)
-    chosen = TIERS[0]
+    cap = getattr(settings, "max_auto_model_gb", 8.0)
+    # With GPU offload the size cap is irrelevant — VRAM does the work.
+    if settings.gpu_layers != 0:
+        cap = float("inf")
+
+    chosen = TIERS[0]  # nano is the floor — always runnable
     for tier in TIERS:
-        if usable >= tier.min_ram_gb:
+        if tier.size_gb > cap:
+            continue
+        needed = max(tier.min_ram_gb, tier.size_gb + kv_cache_gb(tier.context_size) + 0.35)
+        if usable >= needed:
             chosen = tier
     return chosen
 

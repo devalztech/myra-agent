@@ -96,3 +96,7 @@ class ModelStatus(BaseModel):
     contextSize: int
     ramGb: float
     tier: str
+    # idle | downloading | loading | ready | error
+    status: str = "idle"
+    detail: str | None = None
+    threads: int = 1

@@ -55,4 +55,8 @@ export type ModelStatus = {
   contextSize: number;
   ramGb: number;
   tier: string;
+  /** idle | downloading | loading | ready | error */
+  status?: string;
+  detail?: string | null;
+  threads?: number;
 };

@@ -4,6 +4,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { login } from "@/api/auth";
 import { AuthLayout, Field } from "@/components/myra/auth-layout";
 import { useAuth } from "@/lib/auth";
+import { useHydrated } from "@/lib/use-hydrated";
 
 export const Route = createFileRoute("/login")({
   head: () => ({
@@ -23,6 +24,7 @@ export const Route = createFileRoute("/login")({
 function LoginPage() {
   const navigate = useNavigate();
   const { signIn, token, ready } = useAuth();
+  const hydrated = useHydrated();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -86,7 +88,7 @@ function LoginPage() {
 
         <button
           type="submit"
-          disabled={loading}
+          disabled={loading || !hydrated}
           className="w-full rounded-lg bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
         >
           {loading ? "Logging in…" : "Log in"}
