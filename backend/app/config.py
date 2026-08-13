@@ -137,8 +137,12 @@ class Settings:
         # Default provider for new users: "local" (llama.cpp GGUF) or "agnes".
         self.default_provider = _env("MYRA_DEFAULT_PROVIDER", "local").lower()
         self.agnes_api_key = _env("AGNES_API_KEY")
-        self.agnes_base_url = _env("AGNES_BASE_URL", "https://api.agnes.ai/v1")
-        self.agnes_model = _env("AGNES_MODEL", "agnes-1")
+        # The real Agnes API host is apihub.agnes-ai.com, not api.agnes.ai —
+        # the old default pointed at a domain that isn't the documented
+        # endpoint, so every request would fail unless AGNES_BASE_URL was
+        # set explicitly. agnes-2.0-flash is the documented default model.
+        self.agnes_base_url = _env("AGNES_BASE_URL", "https://apihub.agnes-ai.com/v1")
+        self.agnes_model = _env("AGNES_MODEL", "agnes-2.0-flash")
 
         # --- agent workspace ---------------------------------------------
         # Myra's OWN working directory. It lives OUTSIDE the Pterodactyl

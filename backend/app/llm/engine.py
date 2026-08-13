@@ -6,6 +6,11 @@ Two backends:
                     suite and by environments without a downloaded model.
 
 No external/agentic APIs are used anywhere: inference is always local.
+
+Note: this module only covers the LOCAL model. The Agnes remote provider
+lives in app/providers.py (AgnesProvider), used by the agent system
+(app/routers/agent.py) via get_provider() — a separate selection layer on
+top of this one. See providers.py for that.
 """
 
 from __future__ import annotations
