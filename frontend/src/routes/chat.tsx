@@ -710,6 +710,7 @@ function ChatPage() {
                           <Markdown
                             content={message.content}
                             className="text-bubble-agent-foreground"
+                            token={token}
                           />
                           <p className="mt-1.5 text-[0.7rem] text-muted-foreground">
                             {clock(message.createdAt)}
@@ -732,6 +733,7 @@ function ChatPage() {
                           <Markdown
                             content={streaming}
                             className="text-bubble-agent-foreground"
+                            token={token}
                           />
                         </div>
                       ) : (

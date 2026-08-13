@@ -26,7 +26,7 @@ type RequestOptions = {
 };
 
 /** FastAPI returns `{ detail: string | [{ msg }] }` on errors. */
-async function errorMessage(response: Response): Promise<string> {
+export async function errorMessage(response: Response): Promise<string> {
   try {
     const data = (await response.json()) as { detail?: unknown };
     const detail = data?.detail;

@@ -1,7 +1,8 @@
 import { useState, type ReactNode } from "react";
-import { Check, Copy } from "lucide-react";
+import { Check, Copy, Download, Loader2 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { downloadWorkspaceFile } from "@/api/agent";
 
 /**
  * Dependency-free markdown renderer, tuned for agent replies:
@@ -103,8 +104,40 @@ function parseBlocks(source: string): Block[] {
   return blocks;
 }
 
-/** Inline: `code`, **bold**, *italic*, [text](href). */
-function renderInline(text: string, keyPrefix: string): ReactNode[] {
+function DownloadLink({ label, path, token }: { label: string; path: string; token?: string | null }) {
+  const [state, setState] = useState<"idle" | "loading" | "error">("idle");
+
+  const handleClick = async () => {
+    if (!token || state === "loading") return;
+    setState("loading");
+    try {
+      await downloadWorkspaceFile(token, path);
+      setState("idle");
+    } catch {
+      setState("error");
+      setTimeout(() => setState("idle"), 2000);
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={handleClick}
+      disabled={!token || state === "loading"}
+      className="inline-flex items-center gap-1.5 rounded-lg border border-royal/30 bg-surface-raised px-2.5 py-1 font-mono text-[0.85em] text-royal-soft transition-colors hover:bg-royal/10 disabled:cursor-not-allowed disabled:opacity-60"
+    >
+      {state === "loading" ? (
+        <Loader2 className="size-3.5 animate-spin" />
+      ) : (
+        <Download className="size-3.5" />
+      )}
+      {state === "error" ? "Download failed — retry" : label}
+    </button>
+  );
+}
+
+/** Inline: `code`, **bold**, *italic*, [text](href), [file](download:path). */
+function renderInline(text: string, keyPrefix: string, token?: string | null): ReactNode[] {
   const nodes: ReactNode[] = [];
   const pattern = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*]+\*)|(\[[^\]]+\]\([^)\s]+\))/g;
   let last = 0;
@@ -113,44 +146,51 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
 
   while ((match = pattern.exec(text)) !== null) {
     if (match.index > last) nodes.push(text.slice(last, match.index));
-    const token = match[0];
+    const token_ = match[0];
     const id = `${keyPrefix}-i${key++}`;
-    if (token.startsWith("`")) {
+    if (token_.startsWith("`")) {
       nodes.push(
         <code
           key={id}
           className="rounded-[5px] bg-surface-raised px-1.5 py-0.5 font-mono text-[0.85em] text-royal-soft"
         >
-          {token.slice(1, -1)}
+          {token_.slice(1, -1)}
         </code>,
       );
-    } else if (token.startsWith("**")) {
+    } else if (token_.startsWith("**")) {
       nodes.push(
         <strong key={id} className="font-semibold text-foreground">
-          {token.slice(2, -2)}
+          {token_.slice(2, -2)}
         </strong>,
       );
-    } else if (token.startsWith("[")) {
-      const link = /^\[([^\]]+)\]\(([^)\s]+)\)$/.exec(token);
-      nodes.push(
-        <a
-          key={id}
-          href={link?.[2] ?? "#"}
-          target="_blank"
-          rel="noreferrer"
-          className="text-royal-soft underline decoration-royal/40 underline-offset-2"
-        >
-          {link?.[1] ?? token}
-        </a>,
-      );
+    } else if (token_.startsWith("[")) {
+      const link = /^\[([^\]]+)\]\(([^)\s]+)\)$/.exec(token_);
+      const href = link?.[2] ?? "#";
+      if (href.startsWith("download:")) {
+        nodes.push(
+          <DownloadLink key={id} label={link?.[1] ?? "Download"} path={href.slice("download:".length)} token={token} />,
+        );
+      } else {
+        nodes.push(
+          <a
+            key={id}
+            href={href}
+            target="_blank"
+            rel="noreferrer"
+            className="text-royal-soft underline decoration-royal/40 underline-offset-2"
+          >
+            {link?.[1] ?? token_}
+          </a>,
+        );
+      }
     } else {
       nodes.push(
         <em key={id} className="italic">
-          {token.slice(1, -1)}
+          {token_.slice(1, -1)}
         </em>,
       );
     }
-    last = match.index + token.length;
+    last = match.index + token_.length;
   }
   if (last < text.length) nodes.push(text.slice(last));
   return nodes;
@@ -190,7 +230,15 @@ function CodeBlock({ lang, code }: { lang: string; code: string }) {
   );
 }
 
-export function Markdown({ content, className }: { content: string; className?: string }) {
+export function Markdown({
+  content,
+  className,
+  token,
+}: {
+  content: string;
+  className?: string;
+  token?: string | null;
+}) {
   const blocks = parseBlocks(content);
 
   return (
@@ -207,7 +255,7 @@ export function Markdown({ content, className }: { content: string; className?: 
                 : "text-[0.9375rem]";
           return (
             <p key={key} className={cn("mt-4 mb-1.5 font-semibold text-foreground first:mt-0", size)}>
-              {renderInline(block.text, key)}
+              {renderInline(block.text, key, token)}
             </p>
           );
         }
@@ -219,7 +267,7 @@ export function Markdown({ content, className }: { content: string; className?: 
             >
               {block.items.map((item, j) => (
                 <li key={`${key}-${j}`} className="marker:text-royal/60">
-                  {renderInline(item, `${key}-${j}`)}
+                  {renderInline(item, `${key}-${j}`, token)}
                 </li>
               ))}
             </ul>
@@ -227,12 +275,12 @@ export function Markdown({ content, className }: { content: string; className?: 
         if (block.kind === "quote")
           return (
             <p key={key} className="my-3 pl-3 text-muted-foreground shadow-[inset_2px_0_0_var(--royal)]">
-              {renderInline(block.text, key)}
+              {renderInline(block.text, key, token)}
             </p>
           );
         return (
           <p key={key} className="my-2 first:mt-0 last:mb-0">
-            {renderInline(block.text, key)}
+            {renderInline(block.text, key, token)}
           </p>
         );
       })}

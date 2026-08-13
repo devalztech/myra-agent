@@ -1,5 +1,5 @@
 import type { AgentEvent, AgentSettings, ProviderInfo } from "@/types";
-import { API_URL, ApiError, apiRequest } from "./client";
+import { API_URL, ApiError, apiRequest, errorMessage } from "./client";
 
 export function fetchProviders(): Promise<{ providers: ProviderInfo[]; default: string }> {
   return apiRequest<{ providers: ProviderInfo[]; default: string }>("/providers");
@@ -27,9 +27,35 @@ export function fetchSessionEvents(
 }
 
 /**
- * Runs the agent for one user turn and consumes its `data:`-only SSE stream,
- * forwarding every event (thought / tool_start / tool_end / final / done).
+ * Downloads a file from the agent's workspace, authenticated with the
+ * user's token. A plain <a href> to /workspace/download won't work — that
+ * endpoint requires a Bearer token header, which a normal browser
+ * navigation/click never attaches — so this fetches the file as a blob and
+ * triggers the save via a throwaway object URL instead.
  */
+export async function downloadWorkspaceFile(token: string, path: string): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetch(
+      `${API_URL}/workspace/download?path=${encodeURIComponent(path)}`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+  } catch {
+    throw new ApiError(`Cannot reach the Myra backend at ${API_URL}.`, 0);
+  }
+  if (!response.ok) {
+    throw new ApiError(await errorMessage(response), response.status);
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = path.split("/").pop() || "download";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
 export async function runAgent(
   token: string,
   sessionId: string,
