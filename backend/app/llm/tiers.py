@@ -38,7 +38,19 @@ class ModelTier:
 
 
 # Ordered small -> large. Selection picks the largest tier that fits.
+# The two "coder" tiers at the floor are agentic/coding-tuned models chosen
+# for tiny panels (3 GB RAM class): they follow tool-call JSON protocols far
+# better than a general 1B chat model at the same footprint.
 TIERS: tuple[ModelTier, ...] = (
+    ModelTier(
+        name="coder-nano",
+        repo_id="bartowski/Qwen2.5-Coder-0.5B-Instruct-GGUF",
+        filename="Qwen2.5-Coder-0.5B-Instruct-Q4_K_M.gguf",
+        min_ram_gb=0.7,
+        size_gb=0.4,
+        context_size=4096,
+        description="Qwen2.5-Coder 0.5B Instruct (Q4_K_M) — absolute floor, very fast",
+    ),
     ModelTier(
         name="nano",
         repo_id="bartowski/Llama-3.2-1B-Instruct-GGUF",
@@ -48,6 +60,16 @@ TIERS: tuple[ModelTier, ...] = (
         context_size=4096,
         description="Llama 3.2 1B Instruct (Q4_K_M) — small/low-RAM panel, fastest",
     ),
+    ModelTier(
+        name="coder",
+        repo_id="bartowski/Qwen2.5-Coder-1.5B-Instruct-GGUF",
+        filename="Qwen2.5-Coder-1.5B-Instruct-Q4_K_M.gguf",
+        min_ram_gb=1.3,
+        size_gb=1.1,
+        context_size=8192,
+        description="Qwen2.5-Coder 1.5B Instruct (Q4_K_M) — recommended for a 3 GB panel",
+    ),
+
     ModelTier(
         name="compact",
         repo_id="bartowski/Llama-3.2-3B-Instruct-GGUF",

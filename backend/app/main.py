@@ -34,7 +34,10 @@ from app.config import settings
 from app.database import init_db
 from app.llm.engine import get_engine
 from app.llm.tiers import detect_total_ram_gb, select_tier
+from app.routers import agent as agent_router
 from app.routers import auth, chat, sessions
+from app.scheduler import start_scheduler
+from app.workspace import workspace_root
 
 logging.basicConfig(
     level=logging.DEBUG if settings.debug else logging.INFO,
@@ -263,6 +266,8 @@ async def lifespan(_app: FastAPI):
         "Database: %s", "sqlite (%s)" % settings.sqlite_path if settings.is_sqlite else "postgresql"
     )
     logger.info("Detected RAM: %.2f GB -> tier '%s' (%s)", ram, tier.name, tier.description)
+    logger.info("Agent workspace: %s", workspace_root())
+    start_scheduler()
     _start_cloudflare_tunnel(settings.port)
     if settings.preload_model:
         # Load in a daemon thread so boot (and /health) never blocks on a
@@ -306,6 +311,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(sessions.router)
 app.include_router(chat.router)
+app.include_router(agent_router.router)
 
 
 @app.get("/health", tags=["health"])

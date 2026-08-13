@@ -119,9 +119,9 @@ class Settings:
         self.model_tier = _env("MYRA_MODEL_TIER").lower()
         # Never auto-select a model bigger than this many GB of weights.
         # Huge models fit in RAM but are unusably slow on CPU-only panels.
-        self.max_auto_model_gb = _env_float("MYRA_MAX_AUTO_MODEL_GB", 8.0)
+        self.max_auto_model_gb = _env_float("MYRA_MAX_AUTO_MODEL_GB", 2.5)
         # Reserve RAM (GB) for the OS/API when picking a model tier.
-        self.ram_reserve_gb = _env_float("MYRA_RAM_RESERVE_GB", 1.5)
+        self.ram_reserve_gb = _env_float("MYRA_RAM_RESERVE_GB", 1.0)
         self.ram_override_gb = _env_float("MYRA_RAM_GB", 0.0)
         # Preload the model at boot (in a background thread) so the first
         # chat message isn't stuck behind a cold model load.
@@ -132,6 +132,45 @@ class Settings:
         self.use_mlock = _env_bool("MYRA_USE_MLOCK", False)
 
         self.history_window = _env_int("MYRA_HISTORY_WINDOW", 20)
+
+        # --- providers ----------------------------------------------------
+        # Default provider for new users: "local" (llama.cpp GGUF) or "agnes".
+        self.default_provider = _env("MYRA_DEFAULT_PROVIDER", "local").lower()
+        self.agnes_api_key = _env("AGNES_API_KEY")
+        self.agnes_base_url = _env("AGNES_BASE_URL", "https://api.agnes.ai/v1")
+        self.agnes_model = _env("AGNES_MODEL", "agnes-1")
+
+        # --- agent workspace ---------------------------------------------
+        # Myra's OWN working directory. It lives OUTSIDE the Pterodactyl
+        # server files by default (a sibling directory), and every filesystem
+        # / terminal tool is hard-jailed to it. See app/workspace.py.
+        self.workspace_dir = Path(
+            _env("MYRA_WORKSPACE_DIR") or (Path.home() / "myra-workspace")
+        ).expanduser()
+        # Paths Myra may never read or write, even if something escapes above.
+        self.protected_paths = [
+            p.strip()
+            for p in _env(
+                "MYRA_PROTECTED_PATHS",
+                "/home/container,/etc,/root/.ssh,/proc,/sys,/var/lib/pterodactyl",
+            ).split(",")
+            if p.strip()
+        ]
+
+        # --- agent limits -------------------------------------------------
+        self.max_tool_calls = _env_int("MYRA_MAX_TOOL_CALLS", 24)
+        self.max_agent_steps = _env_int("MYRA_MAX_AGENT_STEPS", 16)
+        self.tool_timeout_seconds = _env_int("MYRA_TOOL_TIMEOUT", 120)
+        self.agent_timeout_seconds = _env_int("MYRA_AGENT_TIMEOUT", 900)
+        self.max_file_bytes = _env_int("MYRA_MAX_FILE_BYTES", 512_000)
+        self.max_output_chars = _env_int("MYRA_MAX_OUTPUT_CHARS", 12_000)
+        self.max_upload_bytes = _env_int("MYRA_MAX_UPLOAD_BYTES", 25_000_000)
+        # Commands requiring explicit human approval before they run.
+        self.approval_required = _env_bool("MYRA_APPROVAL_REQUIRED", False)
+        self.enable_network_tools = _env_bool("MYRA_ENABLE_NETWORK_TOOLS", True)
+        self.enable_browser_tools = _env_bool("MYRA_ENABLE_BROWSER_TOOLS", True)
+        self.scheduler_enabled = _env_bool("MYRA_SCHEDULER_ENABLED", True)
+        self.scheduler_interval_seconds = _env_int("MYRA_SCHEDULER_INTERVAL", 30)
 
         # --- cloudflare tunnel ---------------------------------------------
         # With CLOUDFLARE_TUNNEL_TOKEN set: named tunnel, stable hostname
