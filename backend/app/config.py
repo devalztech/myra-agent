@@ -145,11 +145,15 @@ class Settings:
         self.agnes_model = _env("AGNES_MODEL", "agnes-2.0-flash")
 
         # --- agent workspace ---------------------------------------------
-        # Myra's OWN working directory. It lives OUTSIDE the Pterodactyl
-        # server files by default (a sibling directory), and every filesystem
-        # / terminal tool is hard-jailed to it. See app/workspace.py.
+        # Myra's OWN working directory: /home/container/myra by default —
+        # a dedicated subfolder INSIDE the Pterodactyl server directory
+        # (rather than a sibling dir). Every filesystem / terminal tool is
+        # still hard-jailed to this subfolder via safe_path(); the rest of
+        # /home/container stays in protected_paths below, so Myra can
+        # still never read or write anything outside its own subfolder
+        # even though that subfolder now lives inside the panel's tree.
         self.workspace_dir = Path(
-            _env("MYRA_WORKSPACE_DIR") or (Path.home() / "myra-workspace")
+            _env("MYRA_WORKSPACE_DIR") or (Path.home() / "myra")
         ).expanduser()
         # Paths Myra may never read or write, even if something escapes above.
         self.protected_paths = [

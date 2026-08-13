@@ -87,33 +87,80 @@ class AgentEvent:
         return {"type": self.type, **self.data}
 
 
+def _iter_balanced_objects(text: str) -> list[str]:
+    """Find every top-level {...} span in text (not just the first)."""
+    spans: list[str] = []
+    depth = 0
+    start = -1
+    in_string = False
+    escape = False
+    for index, char in enumerate(text):
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif char == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start != -1:
+                    spans.append(text[start : index + 1])
+                    start = -1
+    return spans
+
+
 def _extract_action(text: str) -> dict[str, Any] | None:
-    """Pull the first JSON object out of a model response."""
+    """Pull a complete action out of a model response.
+
+    Small local models sometimes emit the action as two (or more) separate
+    JSON objects back-to-back instead of one merged object, e.g.
+    ``{"thought": "..."}  {"tool": "write_file", "arguments": {...}}``.
+    We collect every top-level JSON object in the text (fenced block first,
+    then raw), and if none of them alone has "tool"/"final", we merge all
+    the dicts found — in order — into one action, since together they
+    represent a single intended step.
+    """
     if not text:
         return None
+
     fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
-    candidates = []
-    if fenced:
-        candidates.append(fenced.group(1).strip())
-    start = text.find("{")
-    if start != -1:
-        depth = 0
-        for index in range(start, len(text)):
-            char = text[index]
-            if char == "{":
-                depth += 1
-            elif char == "}":
-                depth -= 1
-                if depth == 0:
-                    candidates.append(text[start : index + 1])
-                    break
-    for candidate in candidates:
+    search_space = fenced.group(1).strip() if fenced else text
+
+    spans = _iter_balanced_objects(search_space)
+    if not spans and search_space is not text:
+        spans = _iter_balanced_objects(text)
+
+    parsed_objects: list[dict[str, Any]] = []
+    for span in spans:
         try:
-            parsed = json.loads(candidate)
+            parsed = json.loads(span)
         except json.JSONDecodeError:
             continue
-        if isinstance(parsed, dict) and ("tool" in parsed or "final" in parsed):
-            return parsed
+        if isinstance(parsed, dict):
+            parsed_objects.append(parsed)
+            if "tool" in parsed or "final" in parsed:
+                # This one object is already complete on its own.
+                return parsed
+
+    if not parsed_objects:
+        return None
+
+    # No single object had "tool"/"final" — merge everything we found
+    # (e.g. a lone {"thought": ...} followed by {"tool": ..., "arguments": ...}).
+    merged: dict[str, Any] = {}
+    for obj in parsed_objects:
+        merged.update(obj)
+    if "tool" in merged or "final" in merged:
+        return merged
     return None
 
 
