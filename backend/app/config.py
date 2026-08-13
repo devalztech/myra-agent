@@ -10,8 +10,31 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parents[2]  # repository root
-BACKEND_DIR = Path(__file__).resolve().parents[1]
+BACKEND_DIR = Path(__file__).resolve().parents[1]  # the folder containing app/
+# Repo root: if this backend lives inside a "backend/" subfolder (local dev
+# layout, e.g. repo/backend/app/config.py), step up one more; if app/ sits
+# directly at the deploy root (e.g. Pterodactyl's /home/container/app/config.py),
+# treat that same folder as the root instead of walking past it.
+BASE_DIR = BACKEND_DIR.parent if BACKEND_DIR.name == "backend" else BACKEND_DIR
+
+# Load .env directly here, before any _env()/os.environ reads happen below.
+# This used to be done in main.py via load_dotenv(), but that only works
+# reliably when Settings() is constructed *after* main.py's load_dotenv()
+# call runs, and when nothing downstream (like a spawned subprocess) reads
+# the token before that happens. Loading it here instead — at the top of
+# config.py, before Settings.__init__ ever runs — means every value in this
+# file (including the tunnel token below) is available at the exact moment
+# it's first read, regardless of import order or whether this module is
+# reached via `uvicorn app.main:app`, `python -m app.main`, or a bare
+# `python app/main.py`. python-dotenv's load_dotenv() does not override
+# variables the panel already set as real env vars, so panel-level env vars
+# still take priority over .env — .env only fills in what's missing.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(BASE_DIR / ".env")
+except ImportError:  # pragma: no cover - python-dotenv is in requirements.txt
+    pass
 
 
 def _env(name: str, default: str = "") -> str:
@@ -86,6 +109,18 @@ class Settings:
         self.preload_model = _env_bool("MYRA_PRELOAD_MODEL", False)
 
         self.history_window = _env_int("MYRA_HISTORY_WINDOW", 20)
+
+        # --- cloudflare tunnel ---------------------------------------------
+        # With CLOUDFLARE_TUNNEL_TOKEN set: named tunnel, stable hostname
+        # (configured once in the Cloudflare dashboard's Public Hostname
+        # settings). Without one: falls back to a random *.trycloudflare.com
+        # Quick Tunnel URL that changes on every restart.
+        self.cloudflare_tunnel_token = _env("CLOUDFLARE_TUNNEL_TOKEN")
+        # Optional — only used to pre-fill .bin/tunnel_url.txt when a named
+        # tunnel is active, so /health can report the URL immediately on
+        # boot instead of waiting for the first log line from cloudflared.
+        self.public_api_url = _env("PUBLIC_API_URL")
+        self.skip_tunnel = _env_bool("MYRA_SKIP_TUNNEL", False)
 
     def _resolve_database_url(self) -> str:
         url = _env("DATABASE_URL") or _env("MYRA_DATABASE_URL")

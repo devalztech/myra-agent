@@ -31,43 +31,12 @@ else
   echo "$REQ_HASH" > "$STAMP"
 fi
 
-# ---- cloudflared ---------------------------------------------------------
-install_cloudflared() {
-  local bin_dir="$BACKEND_DIR/bin"
-  mkdir -p "$bin_dir"
-  if command -v cloudflared >/dev/null 2>&1; then
-    echo "==> cloudflared already on PATH: $(command -v cloudflared)"
-    return 0
-  fi
-  if [[ -x "$bin_dir/cloudflared" ]]; then
-    echo "==> cloudflared already installed at $bin_dir/cloudflared"
-    return 0
-  fi
-  local arch
-  arch="$(uname -m)"
-  case "$arch" in
-    x86_64|amd64) arch="amd64" ;;
-    aarch64|arm64) arch="arm64" ;;
-    armv7l) arch="arm" ;;
-    *) echo "!! Unsupported arch $arch for cloudflared, skipping"; return 0 ;;
-  esac
-  local url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}"
-  echo "==> Downloading cloudflared ($arch)"
-  if curl -fsSL "$url" -o "$bin_dir/cloudflared.tmp"; then
-    chmod +x "$bin_dir/cloudflared.tmp"
-    mv "$bin_dir/cloudflared.tmp" "$bin_dir/cloudflared"
-    echo "==> cloudflared installed at $bin_dir/cloudflared"
-  else
-    rm -f "$bin_dir/cloudflared.tmp"
-    echo "!! cloudflared download failed — the API will still start without a tunnel"
-  fi
-}
-
-if [[ "${MYRA_SKIP_TUNNEL:-0}" == "1" ]]; then
-  echo "==> MYRA_SKIP_TUNNEL=1, skipping cloudflared install"
-else
-  install_cloudflared
-fi
+# Cloudflare tunnel: cloudflared is downloaded and started by app/main.py
+# itself now (see _start_cloudflare_tunnel there), not here. That keeps
+# tunnel setup working the same way regardless of which entrypoint actually
+# runs — this script, `uvicorn app.main:app` directly, or a panel that
+# executes `python app/main.py` as a bare script and skips this file
+# entirely.
 
 # ---- model ---------------------------------------------------------------
 if [[ "${MYRA_SKIP_MODEL:-0}" == "1" || "${MYRA_LLM_BACKEND:-llama_cpp}" == "mock" ]]; then

@@ -2,7 +2,8 @@ FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    MYRA_MODELS_DIR=/app/backend/models
+    MYRA_MODELS_DIR=/app/backend/models \
+    MYRA_SKIP_INSTALL=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential cmake curl git ca-certificates \

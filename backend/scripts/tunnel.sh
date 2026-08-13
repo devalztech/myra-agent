@@ -21,13 +21,41 @@ CF_BIN="$(command -v cloudflared || true)"
 [[ -z "$CF_BIN" && -x "$BACKEND_DIR/bin/cloudflared" ]] && CF_BIN="$BACKEND_DIR/bin/cloudflared"
 
 if [[ -z "$CF_BIN" ]]; then
+  echo "[tunnel] cloudflared not found — attempting self-install"
+  bin_dir="$BACKEND_DIR/bin"
+  mkdir -p "$bin_dir"
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64|amd64) arch="amd64" ;;
+    aarch64|arm64) arch="arm64" ;;
+    armv7l) arch="arm" ;;
+    *) arch="" ;;
+  esac
+  if [[ -n "$arch" ]]; then
+    url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}"
+    if curl -fsSL "$url" -o "$bin_dir/cloudflared.tmp" 2>>"$LOG"; then
+      chmod +x "$bin_dir/cloudflared.tmp"
+      mv "$bin_dir/cloudflared.tmp" "$bin_dir/cloudflared"
+      CF_BIN="$bin_dir/cloudflared"
+      echo "[tunnel] cloudflared installed at $CF_BIN"
+    else
+      rm -f "$bin_dir/cloudflared.tmp"
+    fi
+  fi
+fi
+
+if [[ -z "$CF_BIN" ]]; then
   echo "[tunnel] cloudflared not installed — skipping tunnel"
   exit 0
 fi
 
 if [[ -n "${CLOUDFLARE_TUNNEL_TOKEN:-}" ]]; then
   echo "[tunnel] Starting named Cloudflare tunnel (token provided)"
-  "$CF_BIN" tunnel --no-autoupdate run --token "$CLOUDFLARE_TUNNEL_TOKEN" >>"$LOG" 2>&1 &
+  # --url pins the origin to IPv4 loopback. Dashboard tunnel configs usually
+  # say "http://localhost:PORT", which resolves to ::1 first while uvicorn
+  # listens on IPv4 only -> cloudflared gets connection refused and Cloudflare
+  # serves "Bad gateway" (502). Overriding here keeps the two in sync.
+  "$CF_BIN" tunnel --no-autoupdate run --token "$CLOUDFLARE_TUNNEL_TOKEN" --url "http://127.0.0.1:${PORT}" >>"$LOG" 2>&1 &
   echo $! > "$BACKEND_DIR/.tunnel-pid"
   if [[ -n "${CLOUDFLARE_TUNNEL_HOSTNAME:-}" ]]; then
     echo "https://${CLOUDFLARE_TUNNEL_HOSTNAME}" > "$URL_FILE"
@@ -39,7 +67,7 @@ if [[ -n "${CLOUDFLARE_TUNNEL_TOKEN:-}" ]]; then
 fi
 
 echo "[tunnel] No CLOUDFLARE_TUNNEL_TOKEN — starting quick tunnel (random URL)"
-"$CF_BIN" tunnel --no-autoupdate --url "http://localhost:${PORT}" >>"$LOG" 2>&1 &
+"$CF_BIN" tunnel --no-autoupdate --url "http://127.0.0.1:${PORT}" >>"$LOG" 2>&1 &
 echo $! > "$BACKEND_DIR/.tunnel-pid"
 
 for _ in $(seq 1 40); do

@@ -51,9 +51,31 @@ def main() -> int:
         return 1
 
     print("[myra] Downloading (first boot only, this may take a while)...")
-    out = hf_hub_download(repo_id=repo_id, filename=filename, local_dir=str(settings.models_dir))
-    print(f"[myra] Downloaded to {out}")
-    return 0
+    import time
+
+    last_err: Exception | None = None
+    for attempt in range(1, 6):
+        try:
+            out = hf_hub_download(
+                repo_id=repo_id,
+                filename=filename,
+                local_dir=str(settings.models_dir),
+                # each retry resumes the partial file instead of starting over
+                force_download=False,
+                etag_timeout=30,
+            )
+            print(f"[myra] Downloaded to {out}")
+            return 0
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+            wait = min(30, 5 * attempt)
+            print(f"[myra] Download attempt {attempt}/5 failed: {exc}")
+            print(f"[myra] Retrying in {wait}s...")
+            time.sleep(wait)
+
+    print(f"[myra] Model download failed after 5 attempts: {last_err}")
+    print("[myra] The API will still start; it will retry on first chat request.")
+    return 1
 
 
 if __name__ == "__main__":

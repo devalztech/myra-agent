@@ -2,8 +2,12 @@
 # Pterodactyl startup command:
 #   bash backend/scripts/start.sh
 #
-# Boot sequence: install deps -> install cloudflared -> download model
-#                -> start tunnel -> start the API.
+# Boot sequence: install deps -> download model -> start the API.
+# The Cloudflare tunnel is started in-process by app/main.py itself
+# (see _start_cloudflare_tunnel there) so it runs the same way no matter
+# how the app is launched — this script, `uvicorn app.main:app` directly,
+# or a panel that runs `python app/main.py` as a bare script. It's no
+# longer started here to avoid launching it twice.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -29,18 +33,6 @@ echo "#  db=${DATABASE_URL:-sqlite (database/myra.db)}"
 echo "###################################################################"
 
 bash scripts/install.sh
-
-if [[ "${MYRA_SKIP_TUNNEL:-0}" != "1" ]]; then
-  bash scripts/tunnel.sh || true
-fi
-
-cleanup() {
-  if [[ -f "$BACKEND_DIR/.tunnel-pid" ]]; then
-    kill "$(cat "$BACKEND_DIR/.tunnel-pid")" 2>/dev/null || true
-    rm -f "$BACKEND_DIR/.tunnel-pid"
-  fi
-}
-trap cleanup EXIT INT TERM
 
 echo "==> Starting API on $HOST:$PORT"
 exec "$PY" -m uvicorn app.main:app --host "$HOST" --port "$PORT" --workers 1 --timeout-keep-alive 75

@@ -85,7 +85,7 @@ def rename_session(
     return to_summary(session)
 
 
-@router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 def delete_session(
     session_id: str,
     user: User = Depends(get_current_user),
