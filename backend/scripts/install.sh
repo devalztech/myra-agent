@@ -28,6 +28,14 @@ else
   echo "==> Installing Python requirements (this can take a few minutes on first boot)"
   "$PY" -m pip install --upgrade pip $PIP_FLAGS
   "$PY" -m pip install $PIP_FLAGS -r requirements.txt
+  # Browser engine for screenshots / page automation. Best-effort: if it
+  # fails (missing system deps), Myra still works — just without screenshots.
+  if "$PY" -m playwright install chromium --with-deps 2>>"$BACKEND_DIR/logs/install.err"; then
+    echo "==> Playwright chromium installed"
+  else
+    echo "!! Playwright chromium install failed (screenshots disabled until fixed)"
+    "$PY" -m playwright install chromium 2>>"$BACKEND_DIR/logs/install.err" || true
+  fi
   echo "$REQ_HASH" > "$STAMP"
 fi
 

@@ -11,3 +11,4 @@ huggingface_hub==0.27.0
 httpx==0.28.1
 python-multipart==0.0.20
 psutil==6.1.1
+playwright==1.49.1

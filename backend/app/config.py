@@ -201,6 +201,22 @@ class Settings:
         self.scheduler_enabled = _env_bool("MYRA_SCHEDULER_ENABLED", True)
         self.scheduler_interval_seconds = _env_int("MYRA_SCHEDULER_INTERVAL", 30)
 
+        # --- self-healing watchdog -----------------------------------------
+        # Monitors tunnel health, CPU, disk and cleanable-file size. On a
+        # trigger it clears logs/caches/temp/uploads (NEVER the db, memory,
+        # workspace or user sessions) then restarts the process so Myra
+        # resumes from saved state. 0 disables a trigger.
+        self.watchdog_enabled = _env_bool("MYRA_WATCHDOG_ENABLED", True)
+        self.watchdog_interval_seconds = _env_int("MYRA_WATCHDOG_INTERVAL", 60)
+        self.watchdog_cpu_max = _env_int("MYRA_WATCHDOG_CPU_MAX", 0)  # 0 = off
+        self.watchdog_disk_max = _env_int("MYRA_WATCHDOG_DISK_MAX", 0)  # 0 = off
+        self.watchdog_cleanable_max = _env_int(
+            "MYRA_WATCHDOG_CLEANABLE_MAX_MB", 0
+        ) * 1024 * 1024  # bytes; 0 = off
+        self.watchdog_check_tunnel = _env_bool("MYRA_WATCHDOG_CHECK_TUNNEL", True)
+        # The deploy root (BASE_DIR) is the watchdog's home for sizing.
+        self.base_dir = BASE_DIR
+
         # --- cloudflare tunnel ---------------------------------------------
         # With CLOUDFLARE_TUNNEL_TOKEN set: named tunnel, stable hostname
         # (configured once in the Cloudflare dashboard's Public Hostname

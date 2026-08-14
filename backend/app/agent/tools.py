@@ -825,13 +825,51 @@ def browse_page(url: str, screenshot: bool = False) -> dict[str, Any]:
     return out
 
 
+def _screenshot_file(source: Path, target: Path) -> None:
+    """Render a local HTML file to a PNG screenshot using Playwright."""
+    _require_network()
+    if not settings.enable_browser_tools:
+        raise CommandBlocked("Browser tools are disabled by configuration.")
+    try:
+        from playwright.sync_api import sync_playwright  # type: ignore
+    except Exception as exc:  # pragma: no cover - optional dependency
+        raise CommandBlocked(
+            "Playwright is not installed. Install it with: pip install playwright && playwright install chromium"
+        ) from exc
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    file_url = source.resolve().as_uri()
+    with sync_playwright() as pw:  # pragma: no cover - needs a browser
+        browser = pw.chromium.launch(headless=True, args=["--no-sandbox", "--allow-file-access-from-files"])
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.goto(file_url, wait_until="load", timeout=45_000)
+        page.screenshot(path=str(target), full_page=True)
+        browser.close()
+
+
 @tool(
     "screenshot_page",
-    "Take a screenshot of a URL and save it in the workspace.",
-    _obj({"url": _str("Absolute http(s) URL.")}, ["url"]),
+    "Take a screenshot of a URL or a local HTML file in the workspace and save it as a PNG. "
+    "Pass `url` for a remote page, or `path` for a workspace file (e.g. landing/index.html).",
+    _obj(
+        {
+            "url": _str("Absolute http(s) URL. Optional if path is given."),
+            "path": _str("Local HTML file in the workspace to screenshot. Optional if url is given."),
+        },
+        [],
+    ),
     label="Taking screenshot",
 )
-def screenshot_page(url: str) -> dict[str, Any]:
+def screenshot_page(url: str = "", path: str = "") -> dict[str, Any]:
+    if path:
+        # Screenshot a local HTML file: resolve it to a file:// URL so the
+        # browser can render it, and save the PNG next to it.
+        file = safe_path(path, must_exist=True)
+        target = file.with_suffix(".png")
+        _screenshot_file(file, target)
+        return {"screenshot": relative(target), "source": relative(file)}
+    if not url:
+        raise ValueError("Provide either `url` or `path`.")
     return browse_page(url, screenshot=True)
 
 

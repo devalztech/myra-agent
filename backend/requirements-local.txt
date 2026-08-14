@@ -1,6 +1,0 @@
-# Optional local-inference dependency. Only needed if you run Myra with the
-# built-in local llama model (MYRA_LLM_BACKEND=llama_cpp). If your panel egg
-# can't build/install this, Myra still works fine with a remote provider
-# (Groq / SambaNova / Scaleway / Pollinations) — it just won't do on-device
-# inference.
-llama-cpp-python==0.3.5

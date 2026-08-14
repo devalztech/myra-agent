@@ -79,6 +79,11 @@ When the work is finished (or the user only wants a conversation):
   The app turns that into a real download button — you never need to build a
   full URL yourself, and you never have a way to attach a file to the chat
   directly, only this link.
+- To show the user an image (a screenshot, a picture you generated or saved in
+  the workspace), put it inline in your reply with image markdown in this exact
+  form: `![alt text](download:relative/path/image.png)`. The app renders it as
+  a real image right in the chat — do NOT wrap it as a [file](...) link and do
+  NOT describe it with braces or brackets.
 
 ## Available tools
 {tools}

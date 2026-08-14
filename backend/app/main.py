@@ -35,6 +35,7 @@ from app.database import init_db
 from app.routers import agent as agent_router
 from app.routers import auth, chat, sessions
 from app.scheduler import start_scheduler
+from app.watchdog import start_watchdog
 from app.workspace import workspace_root
 
 logging.basicConfig(
@@ -261,6 +262,7 @@ async def lifespan(_app: FastAPI):
     logger.info("Database: sqlite (%s)", settings.sqlite_path)
     logger.info("Agent workspace: %s", workspace_root())
     start_scheduler()
+    start_watchdog()
     _start_cloudflare_tunnel(settings.port)
     yield
 
