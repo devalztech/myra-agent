@@ -94,3 +94,12 @@ def delete_session(
     session = get_owned_session(session_id, db, user)
     db.delete(session)
     db.commit()
+    # Best-effort: release this session's persistent browser (if the agent
+    # ever opened one) instead of leaving a chromium process idling until
+    # the manager's own idle sweeper eventually reaps it.
+    try:
+        from ..services.browser import close_session
+
+        close_session(session_id)
+    except Exception:
+        pass

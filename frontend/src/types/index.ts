@@ -95,7 +95,7 @@ export type AgentEvent = {
   [key: string]: unknown;
 };
 
-export type ActivityStatus = "pending" | "running" | "done" | "error" | "blocked";
+export type ActivityStatus = "pending" | "running" | "done" | "error" | "blocked" | "needs_approval" | "unsafe";
 
 /**
  * What kind of action a step represents, independent of whether it

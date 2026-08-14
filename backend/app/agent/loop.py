@@ -216,11 +216,17 @@ class AgentRunner:
         memory: Any = None,
         budget: RunBudget | None = None,
         approved: bool = False,
+        session_id: str | None = None,
     ) -> None:
         self.provider = provider or get_provider()
         self.memory = memory
         self.budget = budget or RunBudget()
         self.approved = approved
+        # Keys the persistent browser session (see services/browser.py) so
+        # a login -> click -> read flow within one chat shares state instead
+        # of every browser tool call getting its own private incognito
+        # instance.
+        self.session_id = session_id
 
     # -- prompt ---------------------------------------------------------
     def system_prompt(self, request: str) -> str:
@@ -393,7 +399,13 @@ class AgentRunner:
                     self.budget.charge_tool()
                     if name == "run_command":
                         arguments.setdefault("timeout", settings.tool_timeout_seconds)
-                    result = call_tool(name, arguments, memory=self.memory)
+                    result = call_tool(
+                        name,
+                        arguments,
+                        memory=self.memory,
+                        session_id=self.session_id,
+                        approved=self.approved,
+                    )
                     observation = (
                         result if isinstance(result, str) else json.dumps(json_safe(result))[:8000]
                     )
@@ -406,7 +418,42 @@ class AgentRunner:
                             "result": truncate(observation, 4000),
                         },
                     )
-                except (ApprovalRequired, CommandBlocked, UnsafePath) as exc:
+                except ApprovalRequired as exc:
+                    # Actionable, not a dead end like the other two: stop the
+                    # run right here (don't let the model spend another step
+                    # narrating it) and hand the UI enough to show a real
+                    # Approve control. Re-sending this same message with
+                    # approved=true (see run_agent's `approved` field) skips
+                    # every approval check for the retry, so the run can
+                    # actually get past this tool call instead of hitting
+                    # the same wall again.
+                    yield AgentEvent(
+                        "tool_end",
+                        {
+                            "tool": name,
+                            "label": tool_def.label,
+                            "status": "needs_approval",
+                            "result": str(exc),
+                        },
+                    )
+                    yield AgentEvent(
+                        "needs_approval",
+                        {"tool": name, "arguments": json_safe(arguments), "message": str(exc)},
+                    )
+                    return
+                except UnsafePath as exc:
+                    # Distinct from a policy refusal: the model tried to
+                    # reach outside its own sandboxed workspace. Worth
+                    # surfacing differently in the UI (a guardrail catch,
+                    # not a config choice) even though the run handles both
+                    # the same way — stop this step, let the model try
+                    # something else.
+                    observation = f"BLOCKED (unsafe path): {exc}"
+                    yield AgentEvent(
+                        "tool_end",
+                        {"tool": name, "label": tool_def.label, "status": "unsafe", "result": str(exc)},
+                    )
+                except CommandBlocked as exc:
                     observation = f"BLOCKED: {exc}"
                     yield AgentEvent(
                         "tool_end",

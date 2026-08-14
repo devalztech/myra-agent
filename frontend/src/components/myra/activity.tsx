@@ -8,6 +8,7 @@ import {
   Loader2,
   Save,
   ShieldAlert,
+  ShieldQuestion,
   SquareTerminal,
   TextSearch,
 } from "lucide-react";
@@ -51,7 +52,14 @@ function StepIcon({ kind, status }: { kind: ActivityKind; status: ActivityStep["
       </span>
     );
   }
-  if (status === "blocked") {
+  if (status === "needs_approval") {
+    return (
+      <span className="z-10 flex size-[1.375rem] shrink-0 items-center justify-center rounded-full bg-amber-500/20">
+        <ShieldQuestion className="size-3 text-amber-500" strokeWidth={2.5} />
+      </span>
+    );
+  }
+  if (status === "unsafe" || status === "blocked") {
     return (
       <span className="z-10 flex size-[1.375rem] shrink-0 items-center justify-center rounded-full bg-muted">
         <ShieldAlert className="size-3 text-muted-foreground" strokeWidth={2.5} />
@@ -76,6 +84,10 @@ function StatusLabel({ status }: { status: ActivityStep["status"] }) {
   if (status === "done") return <span className="text-[0.8125rem] text-royal-soft">Done</span>;
   if (status === "running")
     return <span className="text-[0.8125rem] text-royal-soft">Working…</span>;
+  if (status === "needs_approval")
+    return <span className="text-[0.8125rem] text-amber-500">Needs approval</span>;
+  if (status === "unsafe")
+    return <span className="text-[0.8125rem] text-muted-foreground">Blocked (unsafe path)</span>;
   if (status === "blocked")
     return <span className="text-[0.8125rem] text-muted-foreground">Blocked</span>;
   if (status === "error")

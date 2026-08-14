@@ -104,29 +104,39 @@ export async function apiStream(
   const decoder = new TextDecoder();
   let buffer = "";
 
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
 
-    let split = buffer.indexOf("\n\n");
-    while (split !== -1) {
-      const raw = buffer.slice(0, split);
-      buffer = buffer.slice(split + 2);
-      split = buffer.indexOf("\n\n");
+      let split = buffer.indexOf("\n\n");
+      while (split !== -1) {
+        const raw = buffer.slice(0, split);
+        buffer = buffer.slice(split + 2);
+        split = buffer.indexOf("\n\n");
 
-      let eventName = "message";
-      const dataLines: string[] = [];
-      for (const line of raw.split("\n")) {
-        if (line.startsWith("event:")) eventName = line.slice(6).trim();
-        else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
-      }
-      if (dataLines.length === 0) continue;
-      try {
-        onEvent({ event: eventName, data: JSON.parse(dataLines.join("\n")) });
-      } catch {
-        /* ignore malformed frame */
+        let eventName = "message";
+        const dataLines: string[] = [];
+        for (const line of raw.split("\n")) {
+          if (line.startsWith("event:")) eventName = line.slice(6).trim();
+          else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+        }
+        if (dataLines.length === 0) continue;
+        try {
+          onEvent({ event: eventName, data: JSON.parse(dataLines.join("\n")) });
+        } catch {
+          /* ignore malformed frame */
+        }
       }
     }
+  } catch (err) {
+    // Reader threw mid-stream (network drop, tunnel restart, tab backgrounded
+    // on mobile). This path has no server-side "keeps running in the
+    // background" support (unlike /agent's runAgent), so the only safe move
+    // is to surface a clear, catchable error rather than re-POSTing — a
+    // retry here would start a second, duplicate generation.
+    if ((err as { name?: string })?.name === "AbortError") throw err;
+    throw new ApiError("Connection to Myra was lost mid-response. Please try again.", 0);
   }
 }

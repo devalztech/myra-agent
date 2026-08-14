@@ -375,8 +375,10 @@ def _run(command: str, cwd: Path, timeout: int) -> dict[str, Any]:
     label="Running command",
     mutates=True,
 )
-def run_command(command: str, cwd: str = ".", timeout: int | None = None) -> dict[str, Any]:
-    screen_command(command)
+def run_command(
+    command: str, cwd: str = ".", timeout: int | None = None, _approved: bool = False
+) -> dict[str, Any]:
+    screen_command(command, approved=_approved)
     directory = safe_path(cwd, must_exist=True)
     if directory.is_file():
         directory = directory.parent
@@ -397,7 +399,9 @@ def run_command(command: str, cwd: str = ".", timeout: int | None = None) -> dic
     label="Running tests",
     mutates=True,
 )
-def run_tests(command: str | None = None, cwd: str = ".") -> dict[str, Any]:
+def run_tests(
+    command: str | None = None, cwd: str = ".", _approved: bool = False
+) -> dict[str, Any]:
     directory = safe_path(cwd, must_exist=True)
     if not command:
         if (directory / "package.json").exists():
@@ -406,7 +410,7 @@ def run_tests(command: str | None = None, cwd: str = ".") -> dict[str, Any]:
             command = "python3 -m pytest -q"
         else:
             command = "echo 'No test suite detected.'"
-    screen_command(command)
+    screen_command(command, approved=_approved)
     result = _run(command, directory, settings.tool_timeout_seconds)
     result["passed"] = result["exitCode"] == 0
     return result
@@ -699,35 +703,65 @@ def preview(action: str, path: str = ".") -> dict[str, Any]:
 
 @tool(
     "browser",
-    "Automate a webpage with a real browser (Playwright). Actions: open, text, click, "
-    "fill, type, screenshot. Needs Playwright + chromium installed.",
+    "Automate a webpage with a real, persistent browser session (Playwright). The page "
+    "and its cookies/login state STAY OPEN across calls within this chat, so multi-step "
+    "flows work: open a page, fill a form, click submit, then read the result — each call "
+    "sees what the previous one left on screen. Actions: "
+    "open (navigate to url), text (read the current page), click, fill, type, "
+    "press (send a key, e.g. Enter), scroll (to a selector, or down the page if no "
+    "selector), wait_for (block until a selector appears — use this instead of guessing "
+    "before clicking something that loads late), back (browser back), "
+    "screenshot (save a PNG). Needs Playwright + chromium installed.",
     _obj(
         {
-            "action": _str("open | text | click | fill | type | screenshot"),
-            "url": _str("Absolute http(s) URL to open."),
-            "selector": _str("CSS selector for click/fill/type."),
-            "text": _str("Text to fill/type."),
+            "action": _str(
+                "open | text | click | fill | type | press | scroll | wait_for | back | screenshot"
+            ),
+            "url": _str("Absolute http(s) URL. Required for 'open'."),
+            "selector": _str("CSS selector for click/fill/type/press/scroll/wait_for."),
+            "text": _str("Text to fill/type, or the key name for 'press' (default Enter)."),
+            "screenshot": {
+                "type": "boolean",
+                "description": "Also save a screenshot after this action completes.",
+            },
         },
         ["action"],
     ),
-    label="Automating browser",
+    label="Using browser",
 )
-def browser(action: str, url: str = "", selector: str = "", text: str = "") -> dict[str, Any]:
+def browser(
+    action: str,
+    url: str = "",
+    selector: str = "",
+    text: str = "",
+    screenshot: bool = False,
+    _session_id: str | None = None,
+) -> dict[str, Any]:
     _require_network()
     if not settings.enable_browser_tools:
         raise CommandBlocked("Browser tools are disabled by configuration.")
-    from ..services.browser import open_page
+    from ..services.browser import browser_action
 
-    if action in ("click", "fill", "type") and not selector:
+    action = (action or "").strip().lower()
+    needs_selector = {"click", "fill", "type", "press", "wait_for"}
+    if action in needs_selector and not selector:
         return {"error": f"action '{action}' requires a selector."}
     if action in ("fill", "type") and not text:
         return {"error": f"action '{action}' requires text."}
-    return open_page(
-        url,
-        action=action,
+    if action == "open" and not url:
+        return {"error": "action 'open' requires a url."}
+
+    # Falls back to a shared key if the loop ever runs outside a chat
+    # session (e.g. a future non-chat entry point) — still correct, just not
+    # session-isolated in that edge case.
+    sid = _session_id or "default"
+    return browser_action(
+        sid,
+        action,
+        url=url or None,
         selector=selector or None,
         text=text or None,
-        screenshot=(action == "screenshot"),
+        screenshot=screenshot,
     )
 
 
@@ -807,66 +841,17 @@ def web_search(query: str, limit: int = 5) -> list[dict[str, str]]:
     return results
 
 
-@tool(
-    "browse_page",
-    "Open a page in Myra's internal browser, return its readable text, and optionally save a screenshot.",
-    _obj(
-        {
-            "url": _str("Absolute http(s) URL."),
-            "screenshot": {"type": "boolean", "description": "Save a PNG screenshot in the workspace."},
-        },
-        ["url"],
-    ),
-    label="Browsing page",
-)
-def browse_page(url: str, screenshot: bool = False) -> dict[str, Any]:
-    _require_network()
-    if not settings.enable_browser_tools:
-        raise CommandBlocked("Browser tools are disabled by configuration.")
-    try:
-        from playwright.sync_api import sync_playwright  # type: ignore
-    except Exception:
-        result = http_fetch(url)
-        result["engine"] = "http"
-        result["note"] = (
-            "Playwright is not installed — returned static HTML text instead of a rendered page. "
-            "Install it with `pip install playwright && playwright install chromium`."
-        )
-        return result
+def browse_page(url: str, screenshot: bool = False, _session_id: str | None = None) -> dict[str, Any]:
+    """Deprecated alias for `browser(action="open", url=...)`.
 
-    shots_dir = workspace_root() / ".myra" / "screenshots"
-    shots_dir.mkdir(parents=True, exist_ok=True)
-    out: dict[str, Any] = {"url": url, "engine": "chromium"}
-    out["shot_dir"] = str(shots_dir)
-
-    def _work() -> dict[str, Any]:
-        with sync_playwright() as pw:  # pragma: no cover - needs a browser
-            browser = pw.chromium.launch(headless=True)
-            page = browser.new_page(viewport={"width": 1280, "height": 900})
-            page.goto(url, wait_until="domcontentloaded", timeout=45_000)
-            local = {"title": page.title(), "text": truncate(page.inner_text("body"))}
-            if screenshot:
-                shot = shots_dir / f"page-{int(time.time())}.png"
-                page.screenshot(path=str(shot))
-                local["screenshot"] = relative(shot)
-            browser.close()
-        return local
-
-    try:
-        out.update(_run_off_loop(_work))
-    except Exception as exc:  # pragma: no cover - browser missing at runtime
-        # Browser binary not installed at launch time — degrade to a static
-        # HTML fetch instead of failing the whole agent run.
-        logger = __import__("logging").getLogger("myra.tools")
-        logger.warning("Chromium unavailable (%s); falling back to http_fetch", exc)
-        fallback = http_fetch(url)
-        fallback["engine"] = "http"
-        fallback["note"] = (
-            "Chromium could not launch — returned static HTML text instead of a rendered page. "
-            "Run `playwright install chromium` (or the setup script) to enable browsing."
-        )
-        return fallback
-    return out
+    Kept only so anything referencing the old tool name by habit still
+    works. Delegates to the same persistent-session browser as the
+    `browser` tool now, instead of its old behaviour of launching and
+    tearing down its own private chromium instance per call — which meant
+    this and `browser` could never see each other's navigation/login state
+    even within the same run.
+    """
+    return browser("open", url=url, screenshot=screenshot, _session_id=_session_id)
 
 
 def _screenshot_file(source: Path, target: Path) -> None:
@@ -895,29 +880,29 @@ def _screenshot_file(source: Path, target: Path) -> None:
 
 
 @tool(
-    "screenshot_page",
-    "Take a screenshot of a URL or a local HTML file in the workspace and save it as a PNG. "
-    "Pass `url` for a remote page, or `path` for a workspace file (e.g. landing/index.html).",
+    "screenshot_file",
+    "Render a local HTML file in the workspace and save a full-page PNG screenshot. "
+    "For screenshotting a live URL instead, use the `browser` tool's screenshot action.",
     _obj(
-        {
-            "url": _str("Absolute http(s) URL. Optional if path is given."),
-            "path": _str("Local HTML file in the workspace to screenshot. Optional if url is given."),
-        },
-        [],
+        {"path": _str("Local HTML file in the workspace to screenshot, e.g. landing/index.html.")},
+        ["path"],
     ),
     label="Taking screenshot",
 )
-def screenshot_page(url: str = "", path: str = "") -> dict[str, Any]:
+def screenshot_file(path: str) -> dict[str, Any]:
+    file = safe_path(path, must_exist=True)
+    target = file.with_suffix(".png")
+    _screenshot_file(file, target)
+    return {"screenshot": relative(target), "source": relative(file)}
+
+
+def screenshot_page(url: str = "", path: str = "", _session_id: str | None = None) -> dict[str, Any]:
+    """Deprecated alias. Use `browser(action="screenshot", ...)` or `screenshot_file`."""
     if path:
-        # Screenshot a local HTML file: resolve it to a file:// URL so the
-        # browser can render it, and save the PNG next to it.
-        file = safe_path(path, must_exist=True)
-        target = file.with_suffix(".png")
-        _screenshot_file(file, target)
-        return {"screenshot": relative(target), "source": relative(file)}
+        return screenshot_file(path)
     if not url:
         raise ValueError("Provide either `url` or `path`.")
-    return browse_page(url, screenshot=True)
+    return browser("open", url=url, screenshot=True, _session_id=_session_id)
 
 
 # --------------------------------------------------------------------------
@@ -1000,13 +985,31 @@ def describe_tools() -> str:
     )
 
 
-def call_tool(name: str, arguments: dict[str, Any], *, memory: Any = None) -> Any:
+def call_tool(
+    name: str,
+    arguments: dict[str, Any],
+    *,
+    memory: Any = None,
+    session_id: str | None = None,
+    approved: bool = False,
+) -> Any:
     tool_def = TOOLS.get(name)
     if tool_def is None:
         raise KeyError(f"Unknown tool: {name}")
     kwargs = dict(arguments or {})
     if name in {"remember", "recall", "forget"}:
         kwargs["_memory"] = memory
+    if name == "browser":
+        # Keys the persistent browser session so a login/click/read sequence
+        # within one chat shares the same page instead of each call getting
+        # its own private incognito browser.
+        kwargs["_session_id"] = session_id
+    if name in {"run_command", "run_tests"}:
+        # Was previously never threaded through at all — AgentRunner.approved
+        # was set from the request but nothing downstream ever read it, so
+        # the approval flow could never actually let a retried command
+        # through. This is what makes "re-send with approved=true" real.
+        kwargs["_approved"] = approved
     return tool_def.handler(**kwargs)
 
 

@@ -79,7 +79,17 @@ def _disk_usage_percent(path: Path) -> float:
 
 
 def _tunnel_healthy() -> bool:
-    """Check the tunnel URL file exists and, if PUBLIC_API_URL is set, it responds."""
+    """Check the tunnel URL file exists and, if PUBLIC_API_URL is set, it responds.
+
+    Hits the *local* origin, not the public hostname. Checking through the
+    public Cloudflare-fronted URL means this shares fate with Cloudflare's
+    edge (bot-protection challenges, transient 502/523s, DNS blips) — none
+    of which mean the local API is actually unhealthy, but all of which used
+    to trigger a full process restart here, killing every live SSE stream
+    and in-flight agent run over nothing. Checking 127.0.0.1 directly tests
+    the one thing this trigger should care about: is *this* process alive
+    and answering.
+    """
     try:
         url_file = Path(settings.base_dir) / ".bin" / "tunnel_url.txt"
         if not url_file.exists():
@@ -91,7 +101,11 @@ def _tunnel_healthy() -> bool:
             return True
         import urllib.request
 
-        with urllib.request.urlopen(f"{url}/health", timeout=8) as resp:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{settings.port}/health",
+            headers={"User-Agent": "Mozilla/5.0 (compatible; myra-watchdog)"},
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
             return resp.status == 200
     except Exception:
         return False
@@ -159,17 +173,34 @@ def start_watchdog() -> None:
         return
 
     interval = max(30, settings.watchdog_interval_seconds)
+    # Consecutive bad checks required before a restart fires. A restart kills
+    # every live SSE stream and in-flight agent run, so one noisy reading
+    # (a GC pause, a momentary CPU spike, a transient edge hiccup) must not
+    # be able to trigger it on its own — only a sustained problem should.
+    REQUIRED_STREAK = 3
+    fail_streak = 0
 
     def loop() -> None:
-        logger.info("Watchdog started (every %ss)", interval)
+        nonlocal fail_streak
+        logger.info("Watchdog started (every %ss, needs %sx consecutive)", interval, REQUIRED_STREAK)
         while True:
             time.sleep(interval)
             try:
                 result = _watch_once()
                 if result["fired"]:
-                    logger.warning("Watchdog triggered: %s", ", ".join(result["fired"]))
-                    _cleanup()
-                    _restart()
+                    fail_streak += 1
+                    logger.warning(
+                        "Watchdog check failed (%s/%s): %s",
+                        fail_streak,
+                        REQUIRED_STREAK,
+                        ", ".join(result["fired"]),
+                    )
+                    if fail_streak >= REQUIRED_STREAK:
+                        logger.warning("Watchdog triggered after sustained failures — restarting")
+                        _cleanup()
+                        _restart()
+                else:
+                    fail_streak = 0
             except Exception:  # noqa: BLE001
                 logger.exception("Watchdog iteration failed")
 

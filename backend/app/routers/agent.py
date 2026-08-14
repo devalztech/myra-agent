@@ -284,8 +284,6 @@ def run_agent(
         # starts streaming outside the dependency scope.
         local_db = SessionLocal()
         try:
-            memory = MemoryStore(db=local_db, user_id=user_id)
-
             provider = get_provider(provider_id)
             # Apply the user's saved per-provider config (key/base-url/model).
             user_cfg = (row.provider_configs or {}).get(provider_id, {})
@@ -295,12 +293,6 @@ def run_agent(
                     base_url=user_cfg.get("base_url"),
                     model=user_cfg.get("model"),
                 )
-            runner = AgentRunner(
-                provider=provider,
-                memory=memory,
-                budget=budget,
-                approved=payload.approved,
-            )
             yield _sse({"type": "session", **session_out})
             yield _sse({"type": "user_message", "message": user_message_out})
 
@@ -308,6 +300,7 @@ def run_agent(
             final_text = ""
             client_gone = False
             user_stopped = False
+            pending_approval: dict[str, object] | None = None
             run_id = _uuid()
 
             # The agent loop is a synchronous generator and a single tool call
@@ -325,8 +318,22 @@ def run_agent(
             worker_done = threading.Event()
 
             def _run_loop() -> None:
+                # The agent loop runs on a worker thread, so it needs its OWN
+                # DB session for memory/tool writes. Sharing local_db across
+                # two threads causes SQLAlchemy's "concurrent operations are
+                # not permitted" — the event-loop thread writes live events to
+                # local_db while the worker writes memory to the same session.
+                worker_db = SessionLocal()
                 try:
-                    for event in runner.run(prompt, history):
+                    worker_memory = MemoryStore(db=worker_db, user_id=user_id)
+                    worker_runner = AgentRunner(
+                        provider=provider,
+                        memory=worker_memory,
+                        budget=budget,
+                        approved=payload.approved,
+                        session_id=session_id,
+                    )
+                    for event in worker_runner.run(prompt, history):
                         # If the user asked to stop, stop persisting/forwarding
                         # new events but let the current tool call finish, then
                         # stop early.
@@ -336,10 +343,63 @@ def run_agent(
                 except Exception as exc:  # noqa: BLE001
                     event_queue.put(("error", exc))
                 finally:
+                    worker_db.close()
                     worker_done.set()
                     event_queue.put(("done", None))
 
             threading.Thread(target=_run_loop, daemon=True, name="myra-agent-loop").start()
+
+            # --- dedicated persister thread ---------------------------------
+            # Live-persisting every event with its own commit on the event-loop
+            # thread was the bottleneck: each event blocked the SSE stream and
+            # contended with the worker thread's SQLite writes (SQLite allows
+            # one writer at a time), which is exactly the "slow" the user saw.
+            # Instead, the event-loop just enqueues events (non-blocking) and a
+            # single persister thread flushes them in batches using its own DB
+            # session. The SSE stream never touches the DB on the hot path.
+            persist_queue: "queue.Queue[dict[str, object]]" = queue.Queue(maxsize=1024)
+            persist_done = threading.Event()
+
+            def _persister() -> None:
+                persist_db = SessionLocal()
+                batch: list[dict[str, object]] = []
+                try:
+                    while True:
+                        # Wait up to 0.25s, then flush whatever accumulated.
+                        try:
+                            batch.append(persist_queue.get(timeout=0.25))
+                        except queue.Empty:
+                            pass
+                        if persist_done.is_set() and persist_queue.empty():
+                            break
+                        if not batch:
+                            continue
+                        # Drop the flush sentinel — it's a control message, not
+                        # a real agent event.
+                        batch = [d for d in batch if d.get("type") != "flush"]
+                        if not batch:
+                            continue
+                        try:
+                            for data in batch:
+                                persist_db.add(
+                                    AgentEventRow(
+                                        session_id=session_id,
+                                        message_id=None,
+                                        type=str(data.get("type", "event")),
+                                        payload=json.dumps({**data, "run_id": run_id})[:8000],
+                                    )
+                                )
+                            persist_db.commit()
+                        except Exception:  # noqa: BLE001
+                            persist_db.rollback()
+                        batch.clear()
+                finally:
+                    persist_db.close()
+
+            persister_thread = threading.Thread(
+                target=_persister, daemon=True, name="myra-event-persister"
+            )
+            persister_thread.start()
 
             while True:
                 if worker_done.is_set() and event_queue.empty():
@@ -364,26 +424,22 @@ def run_agent(
                 event = value
                 data = event.dict()
                 events.append(data)
-                # Persist every event live, not just at the end. This is what
-                # lets a user who drops and reconnects (resyncSession -> GET
-                # /sessions/{id}/events) see the *in-progress* trace instead
-                # of nothing until the run fully finishes. A run_id keeps the
-                # batch identifiable and lets the UI distinguish a live run
-                # from older replay.
+                # Hand the event to the persister thread (non-blocking). Live
+                # events let a dropped/reconnected user (resyncSession -> GET
+                # /sessions/{id}/events) see the in-progress trace; the run_id
+                # tags the whole batch.
                 try:
-                    local_db.add(
-                        AgentEventRow(
-                            session_id=session_id,
-                            message_id=None,  # not tied to a final message yet
-                            type=str(data.get("type", "event")),
-                            payload=json.dumps({**data, "run_id": run_id})[:8000],
-                        )
-                    )
-                    local_db.commit()
-                except Exception:  # noqa: BLE001 - don't let a DB hiccup kill the run
-                    local_db.rollback()
+                    persist_queue.put_nowait(data)
+                except queue.Full:
+                    pass  # drop the odd event under extreme load; never block the stream
                 if event.type == "final":
                     final_text = str(event.data.get("text", ""))
+                if event.type == "needs_approval":
+                    pending_approval = {
+                        "tool": event.data.get("tool"),
+                        "arguments": event.data.get("arguments"),
+                        "message": event.data.get("message"),
+                    }
                 # A dropped/closed connection (phone locked, tab closed, wifi
                 # blip) does NOT stop the run — Myra keeps working and the
                 # full step-by-step trace is saved below via AgentEventRow,
@@ -398,10 +454,30 @@ def run_agent(
                 if _consume_stop(session_id):
                     user_stopped = True
 
+            # Tell the persister to drain and finish before we write the final
+            # assistant message, so the live trace is complete on disk. It
+            # exits once persist_done is set and the queue is empty; join it
+            # (bounded) to guarantee everything landed before the assistant row.
+            persist_done.set()
+            try:
+                # Wake a possibly-blocked get() so it re-checks the done flag.
+                persist_queue.put_nowait({"type": "flush"})
+            except queue.Full:
+                pass
+            persister_thread.join(timeout=5)
+
             assistant = ChatMessage(
                 session_id=session_id,
                 role="assistant",
-                content=final_text or ("(stopped)" if user_stopped else "(no reply)"),
+                content=(
+                    final_text
+                    or (
+                        f"Waiting for approval to run: {pending_approval.get('tool')}"
+                        if pending_approval
+                        else None
+                    )
+                    or ("(stopped)" if user_stopped else "(no reply)")
+                ),
             )
             local_db.add(assistant)
             local_db.commit()
@@ -419,6 +495,7 @@ def run_agent(
                         "content": assistant.content,
                         "createdAt": (stored or assistant).created_at.isoformat(),
                     },
+                    **({"pendingApproval": pending_approval} if pending_approval else {}),
                 }
             )
         except Exception as exc:  # pragma: no cover - surfaced to the UI

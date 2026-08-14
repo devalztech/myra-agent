@@ -107,8 +107,12 @@ const TOOL_KIND: Record<string, ActivityStep["kind"]> = {
   run_tests: "run",
   http_fetch: "network",
   web_search: "network",
+  browser: "network",
+  // Deprecated aliases — still mapped so history from before the browser
+  // tool consolidation still renders with the right icon.
   browse_page: "network",
   screenshot_page: "network",
+  screenshot_file: "network",
 };
 
 function kindForTool(tool: string): ActivityStep["kind"] {
@@ -161,14 +165,16 @@ function reduceSteps(previous: ActivityStep[], event: AgentEvent): ActivityStep[
   }
 
   if (event.type === "tool_end" || event.type === "tool_error") {
+    const rawStatus = event["status"] as string | undefined;
+    const KNOWN_STATUSES = new Set(["blocked", "needs_approval", "unsafe"]);
     const status =
       event.type === "tool_error"
         ? "error"
-        : ((event["status"] as string) === "ok"
-            ? "done"
-            : (event["status"] as string) === "blocked"
-              ? "blocked"
-              : "error");
+        : rawStatus === "ok"
+          ? "done"
+          : rawStatus && KNOWN_STATUSES.has(rawStatus)
+            ? rawStatus
+            : "error";
     const body = String(event["result"] ?? event["message"] ?? "").trim() || undefined;
     for (let i = steps.length - 1; i >= 0; i -= 1) {
       const step = steps[i];
@@ -223,6 +229,11 @@ function ChatPage() {
   const [showApiKeys, setShowApiKeys] = useState(false);
   const [providerConfigs, setProviderConfigs] = useState<Record<string, { apiKey?: string | null; baseUrl?: string | null; model?: string | null; hasKey: boolean }>>({});
   const [notice, setNotice] = useState<string | null>(null);
+  const [pendingApproval, setPendingApproval] = useState<{
+    tool: string;
+    message: string;
+    content: string;
+  } | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -425,9 +436,12 @@ function ChatPage() {
     }
   };
 
-  const send = async (event?: FormEvent) => {
+  const send = async (
+    event?: FormEvent,
+    options?: { approved?: boolean; overrideContent?: string },
+  ) => {
     event?.preventDefault();
-    let content = draft.trim();
+    let content = (options?.overrideContent ?? draft).trim();
     if (attachedPath) {
       content = `${content}\n\n[Uploaded file: ${attachedPath}]`;
     }
@@ -435,12 +449,13 @@ function ChatPage() {
 
     setError(null);
     setNotice(null);
-    setDraft("");
+    if (!options?.overrideContent) setDraft("");
     setSending(true);
     setStopping(false);
     setStreaming("");
     setLiveSteps([]);
     setAttachedPath(null);
+    setPendingApproval(null);
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -459,31 +474,46 @@ function ChatPage() {
         setActiveId(created.id);
       }
 
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `local-${Date.now()}`,
-          role: "user",
-          content,
-          createdAt: new Date().toISOString(),
-        },
-      ]);
+      if (!options?.approved) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `local-${Date.now()}`,
+            role: "user",
+            content,
+            createdAt: new Date().toISOString(),
+          },
+        ]);
+      }
 
       if (settings?.agentMode !== false) {
         let steps: ActivityStep[] = [];
+        let sawApprovalPrompt = false;
         await runAgent(
           token,
           sessionId,
           content,
           {
             ...(settings?.provider ? { provider: settings.provider } : {}),
-            approved: true,
+            // Only true on the deliberate resend after the user taps
+            // Approve (see approveAndContinue below) — sending true on every
+            // ordinary message would make MYRA_APPROVAL_REQUIRED a no-op,
+            // since the backend would always see a pre-approved request.
+            approved: options?.approved ?? false,
             signal: controller.signal,
           },
           (frame) => {
             if (frame.type === "error") {
               setError(String(frame["message"] ?? "Agent run failed."));
               return;
+            }
+            if (frame.type === "needs_approval") {
+              sawApprovalPrompt = true;
+              setPendingApproval({
+                tool: String(frame["tool"] ?? ""),
+                message: String(frame["message"] ?? "This step needs your approval."),
+                content,
+              });
             }
             if (frame.type === "final") {
               capturedText = String(frame["text"] ?? "");
@@ -495,6 +525,7 @@ function ChatPage() {
                 setMessages((prev) => [...prev, message]);
                 setStepsByMessage((prev) => ({ ...prev, [message.id]: steps }));
               }
+              if (!sawApprovalPrompt) setPendingApproval(null);
               setStreaming("");
               setLiveSteps([]);
               return;
@@ -536,7 +567,7 @@ function ChatPage() {
     } catch (err) {
       if (controller.signal.aborted) {
         setNotice("Stopped.");
-        setDraft(content);
+        if (!options?.overrideContent) setDraft(content);
         // Keep whatever Myra had done so far visible as a finished (not
         // "running") record instead of wiping it — stopping shouldn't hide
         // the steps that already happened.
@@ -560,7 +591,7 @@ function ChatPage() {
         }
       } else {
         setError(err instanceof Error ? err.message : "Message failed to send.");
-        setDraft(content);
+        if (!options?.overrideContent) setDraft(content);
         // Connection dropped: the backend keeps the agent working. Resync
         // immediately to pull back whatever happened while we were offline,
         // then keep polling /events so the in-progress steps stay live until
@@ -591,6 +622,19 @@ function ChatPage() {
     }
     abortRef.current.abort();
   }, [token, activeId]);
+
+  // Re-sends the prompt that triggered a `needs_approval` pause, this time
+  // with approved: true, so the same tool call that stopped the run gets
+  // past the guardrail on retry instead of hitting the same wall again. No
+  // new user bubble is added (see send()'s options.approved check) since
+  // this isn't a new message from the user's point of view — it's
+  // continuing the one that paused.
+  const approveAndContinue = useCallback(() => {
+    if (!pendingApproval) return;
+    void send(undefined, { approved: true, overrideContent: pendingApproval.content });
+  }, [pendingApproval]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const dismissApproval = useCallback(() => setPendingApproval(null), []);
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "Enter" && !event.shiftKey) {
@@ -1007,6 +1051,34 @@ function ChatPage() {
               >
                 {error ?? notice}
               </p>
+            )}
+
+            {pendingApproval && !sending && (
+              <div
+                role="alert"
+                className="mt-5 space-y-2.5 rounded-xl bg-amber-500/10 px-4 py-3 ring-1 ring-amber-500/30"
+              >
+                <p className="text-[0.875rem] text-foreground/90">
+                  <span className="font-medium text-amber-500">Needs approval:</span>{" "}
+                  {pendingApproval.message}
+                </p>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={approveAndContinue}
+                    className="focus-royal rounded-lg bg-amber-500 px-3 py-1.5 text-[0.8125rem] font-medium text-white"
+                  >
+                    Approve &amp; continue
+                  </button>
+                  <button
+                    type="button"
+                    onClick={dismissApproval}
+                    className="focus-royal rounded-lg px-3 py-1.5 text-[0.8125rem] text-muted-foreground ring-1 ring-hairline"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              </div>
             )}
           </div>
         </div>
