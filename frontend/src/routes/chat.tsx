@@ -118,6 +118,9 @@ function kindForTool(tool: string): ActivityStep["kind"] {
 /** Turns raw agent SSE frames into an ordered activity timeline. */
 function reduceSteps(previous: ActivityStep[], event: AgentEvent): ActivityStep[] {
   const steps = [...previous];
+  // Server keep-alive heartbeat — not a real step. Silently ignore so it
+  // never renders as a bogus "Working…" row in the activity timeline.
+  if (event.type === "ping") return steps;
   const label = (event["label"] as string) || (event["tool"] as string) || "Working";
 
   if (event.type === "thought") {
@@ -558,9 +561,11 @@ function ChatPage() {
       } else {
         setError(err instanceof Error ? err.message : "Message failed to send.");
         setDraft(content);
-        // Connection dropped: the backend keeps the agent working, so pull
-        // back whatever it finished while we were offline.
-        void resyncSession();
+        // Connection dropped: the backend keeps the agent working. Resync
+        // immediately to pull back whatever happened while we were offline,
+        // then keep polling /events so the in-progress steps stay live until
+        // the run actually finishes.
+        void resyncSession().then(() => pollForCompletion());
       }
     } finally {
       setStreaming("");
@@ -630,14 +635,55 @@ function ChatPage() {
       setMessages(session.messages);
       const { events } = await fetchSessionEvents(token, activeId);
       const grouped: Record<string, ActivityStep[]> = {};
+      // Events persisted live during an in-flight run have no messageId yet.
+      // Show them under a "live" group so a user who drops and reconnects
+      // still sees the steps myra is currently working on (not just history).
+      let live: ActivityStep[] = [];
       for (const event of events) {
         const id = event.messageId;
-        if (!id) continue;
+        if (!id) {
+          live = reduceSteps(live, event);
+          continue;
+        }
         grouped[id] = reduceSteps(grouped[id] ?? [], event);
       }
       setStepsByMessage(grouped);
+      setLiveSteps(live);
     } catch {
       /* ignore — keep whatever we have */
+    }
+  }, [token, activeId]);
+
+  // After a mid-run disconnect the backend keeps working. Poll /events until
+  // the run finishes so the UI stays live (steps keep updating in real time)
+  // instead of freezing on the last frame we saw before the drop.
+  const pollForCompletion = useCallback(async () => {
+    if (!token || !activeId) return;
+    for (let i = 0; i < 600; i += 1) {
+      // Bail if the user started a new run or left the session.
+      if (abortRef.current?.signal.aborted) return;
+      try {
+        const { events } = await fetchSessionEvents(token, activeId);
+        let live: ActivityStep[] = [];
+        const grouped: Record<string, ActivityStep[]> = {};
+        for (const event of events) {
+          const id = event.messageId;
+          if (!id) {
+            live = reduceSteps(live, event);
+            continue;
+          }
+          grouped[id] = reduceSteps(grouped[id] ?? [], event);
+        }
+        setStepsByMessage(grouped);
+        setLiveSteps(live);
+        if (events.some((e) => e.type === "done")) {
+          setLiveSteps([]);
+          return;
+        }
+      } catch {
+        return; // backend unreachable — stop polling
+      }
+      await new Promise((r) => setTimeout(r, 3000));
     }
   }, [token, activeId]);
 

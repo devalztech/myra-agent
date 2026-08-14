@@ -31,6 +31,8 @@ import time
 import urllib.parse
 import urllib.request
 import zipfile
+import queue
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -52,6 +54,30 @@ SKIP_DIRS = {
     ".cache",
     ".myra",
 }
+
+
+def _run_off_loop(fn: Callable[..., Any], *args: Any) -> Any:
+    """Run a sync Playwright/blocking call in a fresh worker thread.
+
+    The agent loop is synchronous (``def run``) but is consumed from an async
+    FastAPI streaming endpoint, so ``sync_playwright`` sees an active event
+    loop on the calling thread and raises "Sync API inside async loop". Running
+    the call on a plain worker thread (which has no event loop) sidesteps that
+    without converting the whole loop to the async Playwright API.
+    """
+    result: "queue.Queue[tuple[bool, Any]]" = queue.Queue(maxsize=1)
+
+    def _worker() -> None:
+        try:
+            result.put((True, fn(*args)))
+        except Exception as exc:  # noqa: BLE001
+            result.put((False, exc))
+
+    threading.Thread(target=_worker, daemon=True).start()
+    ok, value = result.get(timeout=120)
+    if not ok:
+        raise value
+    return value
 
 
 @dataclass
@@ -811,17 +837,35 @@ def browse_page(url: str, screenshot: bool = False) -> dict[str, Any]:
     shots_dir = workspace_root() / ".myra" / "screenshots"
     shots_dir.mkdir(parents=True, exist_ok=True)
     out: dict[str, Any] = {"url": url, "engine": "chromium"}
-    with sync_playwright() as pw:  # pragma: no cover - needs a browser
-        browser = pw.chromium.launch(headless=True)
-        page = browser.new_page(viewport={"width": 1280, "height": 900})
-        page.goto(url, wait_until="domcontentloaded", timeout=45_000)
-        out["title"] = page.title()
-        out["text"] = truncate(page.inner_text("body"))
-        if screenshot:
-            shot = shots_dir / f"page-{int(time.time())}.png"
-            page.screenshot(path=str(shot))
-            out["screenshot"] = relative(shot)
-        browser.close()
+    out["shot_dir"] = str(shots_dir)
+
+    def _work() -> dict[str, Any]:
+        with sync_playwright() as pw:  # pragma: no cover - needs a browser
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 1280, "height": 900})
+            page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+            local = {"title": page.title(), "text": truncate(page.inner_text("body"))}
+            if screenshot:
+                shot = shots_dir / f"page-{int(time.time())}.png"
+                page.screenshot(path=str(shot))
+                local["screenshot"] = relative(shot)
+            browser.close()
+        return local
+
+    try:
+        out.update(_run_off_loop(_work))
+    except Exception as exc:  # pragma: no cover - browser missing at runtime
+        # Browser binary not installed at launch time — degrade to a static
+        # HTML fetch instead of failing the whole agent run.
+        logger = __import__("logging").getLogger("myra.tools")
+        logger.warning("Chromium unavailable (%s); falling back to http_fetch", exc)
+        fallback = http_fetch(url)
+        fallback["engine"] = "http"
+        fallback["note"] = (
+            "Chromium could not launch — returned static HTML text instead of a rendered page. "
+            "Run `playwright install chromium` (or the setup script) to enable browsing."
+        )
+        return fallback
     return out
 
 
@@ -839,12 +883,15 @@ def _screenshot_file(source: Path, target: Path) -> None:
 
     target.parent.mkdir(parents=True, exist_ok=True)
     file_url = source.resolve().as_uri()
-    with sync_playwright() as pw:  # pragma: no cover - needs a browser
-        browser = pw.chromium.launch(headless=True, args=["--no-sandbox", "--allow-file-access-from-files"])
-        page = browser.new_page(viewport={"width": 1280, "height": 900})
-        page.goto(file_url, wait_until="load", timeout=45_000)
-        page.screenshot(path=str(target), full_page=True)
-        browser.close()
+    def _work() -> None:  # pragma: no cover - needs a browser
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True, args=["--no-sandbox", "--allow-file-access-from-files"])
+            page = browser.new_page(viewport={"width": 1280, "height": 900})
+            page.goto(file_url, wait_until="load", timeout=45_000)
+            page.screenshot(path=str(target), full_page=True)
+            browser.close()
+
+    _run_off_loop(_work)
 
 
 @tool(

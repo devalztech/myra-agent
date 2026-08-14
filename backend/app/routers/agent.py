@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 import threading
 from collections.abc import AsyncIterator
 from datetime import timedelta
+import asyncio
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, status
@@ -24,7 +26,7 @@ from ..config import settings
 from ..database import SessionLocal, get_db
 from ..deps import get_current_user, get_owned_session
 from ..llmutil import title_from_message
-from ..models import AgentEventRow, ChatMessage, Memory, ScheduledTask, User, UserSettings, utcnow
+from ..models import AgentEventRow, ChatMessage, Memory, ScheduledTask, User, UserSettings, _uuid, utcnow
 from ..providers import get_provider, list_providers
 from ..scheduler import run_task_now
 from ..workspace import UnsafePath, relative, safe_path, workspace_info, workspace_root
@@ -306,9 +308,80 @@ def run_agent(
             final_text = ""
             client_gone = False
             user_stopped = False
-            for event in runner.run(prompt, history):
+            run_id = _uuid()
+
+            # The agent loop is a synchronous generator and a single tool call
+            # (browser/screenshot/command) can take 30-60s. If we consume it
+            # directly on the event-loop thread, no SSE bytes flow during those
+            # calls — proxies, Cloudflare and the panel all treat a silent
+            # stream as dead and kill the connection mid-run ("connection lost
+            # while myra works"). So run the loop on a plain worker thread and
+            # bridge its events into the async generator through a queue. The
+            # generator never blocks for more than HEARTBEAT_INTERVAL, emitting
+            # a keep-alive ping whenever the worker is quiet — which keeps the
+            # stream alive through long tool calls and flaky networks.
+            HEARTBEAT_INTERVAL = 15  # seconds between keep-alive pings
+            event_queue: "queue.Queue[object]" = queue.Queue(maxsize=256)
+            worker_done = threading.Event()
+
+            def _run_loop() -> None:
+                try:
+                    for event in runner.run(prompt, history):
+                        # If the user asked to stop, stop persisting/forwarding
+                        # new events but let the current tool call finish, then
+                        # stop early.
+                        if _consume_stop(session_id):
+                            break
+                        event_queue.put(("event", event))
+                except Exception as exc:  # noqa: BLE001
+                    event_queue.put(("error", exc))
+                finally:
+                    worker_done.set()
+                    event_queue.put(("done", None))
+
+            threading.Thread(target=_run_loop, daemon=True, name="myra-agent-loop").start()
+
+            while True:
+                if worker_done.is_set() and event_queue.empty():
+                    break  # worker finished and everything was consumed
+                try:
+                    kind, value = event_queue.get(timeout=HEARTBEAT_INTERVAL)
+                except queue.Empty:
+                    # Worker still busy (long tool call) — send keep-alive so
+                    # the connection isn't torn down by an idle proxy/timeout.
+                    if not client_gone:
+                        yield _sse({"type": "ping"})
+                    continue
+
+                if kind == "error":
+                    logger.exception("Agent run failed", exc_info=value)
+                    if not client_gone:
+                        yield _sse({"type": "error", "message": f"{type(value).__name__}: {value}"})
+                    break
+                if kind == "done":
+                    break
+
+                event = value
                 data = event.dict()
                 events.append(data)
+                # Persist every event live, not just at the end. This is what
+                # lets a user who drops and reconnects (resyncSession -> GET
+                # /sessions/{id}/events) see the *in-progress* trace instead
+                # of nothing until the run fully finishes. A run_id keeps the
+                # batch identifiable and lets the UI distinguish a live run
+                # from older replay.
+                try:
+                    local_db.add(
+                        AgentEventRow(
+                            session_id=session_id,
+                            message_id=None,  # not tied to a final message yet
+                            type=str(data.get("type", "event")),
+                            payload=json.dumps({**data, "run_id": run_id})[:8000],
+                        )
+                    )
+                    local_db.commit()
+                except Exception:  # noqa: BLE001 - don't let a DB hiccup kill the run
+                    local_db.rollback()
                 if event.type == "final":
                     final_text = str(event.data.get("text", ""))
                 # A dropped/closed connection (phone locked, tab closed, wifi
@@ -324,7 +397,6 @@ def run_agent(
                     yield _sse(data)
                 if _consume_stop(session_id):
                     user_stopped = True
-                    break
 
             assistant = ChatMessage(
                 session_id=session_id,
@@ -334,15 +406,6 @@ def run_agent(
             local_db.add(assistant)
             local_db.commit()
             local_db.refresh(assistant)
-            for data in events:
-                local_db.add(
-                    AgentEventRow(
-                        session_id=session_id,
-                        message_id=assistant.id,
-                        type=str(data.get("type", "event")),
-                        payload=json.dumps(data)[:8000],
-                    )
-                )
             stored = local_db.get(ChatMessage, assistant.id)
             local_db.commit()
             if client_gone:

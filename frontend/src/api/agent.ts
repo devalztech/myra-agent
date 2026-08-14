@@ -123,6 +123,7 @@ export async function runAgent(
 ): Promise<void> {
   const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const MAX_RETRIES = 2;
+  let gotEvents = false;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
     if (options.signal?.aborted) throw new Error("aborted");
@@ -182,13 +183,22 @@ export async function runAgent(
             continue;
           }
           if (event.type === "done") sawDone = true;
+          gotEvents = true;
           onEvent(event);
         }
       }
     } catch {
-      // Stream broke mid-flight (network drop). Retry unless the user
-      // stopped or we already saw a clean terminal event.
+      // Stream broke mid-flight (network drop). Do NOT re-POST the /agent
+      // request: the backend keeps the run alive server-side, and a fresh
+      // POST would start a *duplicate* run on the same session. Instead throw
+      // so the caller's resyncSession() reattaches to the still-running job
+      // and pulls back whatever it finished while we were offline. We only
+      // retry the POST when we never got a single event (initial connect
+      // dropped before any data flowed).
       if (options.signal?.aborted || sawDone) throw new Error("aborted");
+      if (gotEvents) {
+        throw new ApiError("Connection to Myra was lost mid-response.", 0);
+      }
       if (attempt < MAX_RETRIES) {
         await delay(1200 * (attempt + 1));
         continue;
