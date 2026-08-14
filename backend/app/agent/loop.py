@@ -164,6 +164,33 @@ def _extract_action(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _looks_like_broken_json(text: str) -> bool:
+    """True when text is clearly an attempted JSON action that failed to parse.
+
+    Distinguishes a real prose reply (no action tags, model chose to just
+    answer) from a hiccup — the model started the `{"thought": ...}`
+    protocol but got cut off, duplicated a brace, or otherwise produced
+    invalid JSON. Those must never reach the user verbatim as the final
+    reply; they read as a raw, broken tool call rather than an answer.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if stripped.startswith("{") or stripped.startswith("```"):
+        return True
+    # Mentions the protocol's own field names in a JSON-ish shape even
+    # without a leading brace (e.g. the opening brace got truncated away).
+    return bool(re.search(r'"(thought|tool|final|arguments)"\s*:', stripped))
+
+
+REPAIR_NUDGE = (
+    "Your last reply was not valid JSON and could not be parsed as an action. "
+    "Respond again with exactly ONE well-formed JSON object — either "
+    '{"thought": "...", "tool": "...", "arguments": {...}} or '
+    '{"thought": "...", "final": "..."} — and nothing else.'
+)
+
+
 class AgentRunner:
     """Runs one user turn to completion, yielding events as it goes."""
 
@@ -190,9 +217,34 @@ class AgentRunner:
             digest = self.memory.digest(request)
             if digest:
                 blocks.append(digest)
-        context = build_context(request)
+        context = build_context(request, max_context_chars=self._context_budget_chars())
         blocks.append("Current workspace context:\n" + context.as_prompt())
         return "\n\n".join(blocks)
+
+    def _context_budget_chars(self) -> int:
+        """How many chars of workspace context to inline in the prompt.
+
+        Every char here is something the local model has to re-ingest on
+        CPU before it can start generating — the single biggest fixed cost
+        of a run on small/no-GPU panels (see llm/engine.py's KV cache for
+        what's saved on repeat steps *within* a run; this controls what
+        gets ingested at all on the first step). A flat 8000-char budget
+        made sense as a rough default but eats a large fraction of a
+        4k-context nano/coder-nano model's whole window before the
+        conversation even starts. Scale it off the model's actual
+        context_size when the local engine exposes one; remote providers
+        (larger windows, no local CPU cost) keep the original default.
+        """
+        engine = getattr(self.provider, "_engine", None)
+        context_size = getattr(engine, "context_size", None)
+        if not isinstance(context_size, int) or context_size <= 0:
+            return 8000
+        # Reserve the rest of the window for tools/skills/history/reply;
+        # workspace context gets roughly a third of it, in chars (~4
+        # chars/token), floored so tiny-context tiers still get *something*
+        # useful and capped so a huge-context tier doesn't just re-adopt
+        # the old flat cost for no reason.
+        return max(1500, min(8000, int(context_size * 4 * 0.33)))
 
     # -- run ------------------------------------------------------------
     def run(self, request: str, history: list[dict[str, str]] | None = None) -> Iterator[AgentEvent]:
@@ -203,6 +255,7 @@ class AgentRunner:
             {"role": "user", "content": request},
         ]
         final_text: str | None = None
+        repair_attempted = False
 
         yield AgentEvent("run_start", {"provider": self.provider.id, "model": self.provider.model})
 
@@ -218,8 +271,27 @@ class AgentRunner:
 
             action = _extract_action(raw)
             if action is None:
-                # The model answered in prose — treat it as the final reply.
-                final_text = raw
+                if _looks_like_broken_json(raw) and not repair_attempted:
+                    # A hiccup, not a real answer: the model started the
+                    # JSON-action protocol and produced something broken
+                    # (truncated, duplicated braces, stray text). Never
+                    # surface that raw fragment as the reply — ask the
+                    # model to redo this one step as clean JSON instead.
+                    # Only one retry per turn so a persistently broken
+                    # model still terminates instead of looping forever.
+                    repair_attempted = True
+                    logger.warning("Discarding malformed action, requesting repair: %.200r", raw)
+                    yield AgentEvent("thought", {"text": "That came out malformed — retrying."})
+                    transcript.append({"role": "assistant", "content": raw})
+                    transcript.append({"role": "user", "content": REPAIR_NUDGE})
+                    continue
+                # Genuine prose reply (or a second consecutive hiccup, in
+                # which case we stop retrying and give the user *something*
+                # rather than silently failing the turn).
+                final_text = raw if not _looks_like_broken_json(raw) else (
+                    "I ran into a formatting hiccup and couldn't complete that step cleanly. "
+                    "Could you try rephrasing, or ask me to try again?"
+                )
                 break
 
             thought = str(action.get("thought") or "").strip()

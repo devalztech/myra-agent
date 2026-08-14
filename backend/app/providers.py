@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -123,6 +124,78 @@ class MockProvider(BaseProvider):
             yield chunk + " "
 
 
+class GeminiProvider(BaseProvider):
+    """Google Generative Language API (v1beta) — `generateContent` REST.
+
+    Not keyless on the real endpoint: Google always requires an API key.
+    The provider stays switchable in the UI and returns a clear message
+    when GEMINI_API_KEY is missing, so users know exactly why it isn't
+    available rather than it being silently absent.
+    """
+
+    id = "gemini"
+    name = "Google Gemini (v1beta)"
+    kind = "remote"
+
+    @property
+    def model(self) -> str | None:
+        return settings.gemini_model
+
+    @property
+    def available(self) -> bool:
+        return bool(settings.gemini_api_key)
+
+    @property
+    def detail(self) -> str | None:
+        if not settings.gemini_api_key:
+            return "Set GEMINI_API_KEY in .env to enable Google Gemini."
+        return settings.gemini_base_url
+
+    def _request(self, messages: list[Message]) -> urllib.request.Request:
+        if not settings.gemini_api_key:
+            raise LLMUnavailable("Google Gemini is not configured (missing GEMINI_API_KEY).")
+        contents: list[dict[str, object]] = []
+        for message in messages:
+            role = "model" if message.get("role") in ("assistant", "system") else "user"
+            contents.append({"role": role, "parts": [{"text": message.get("content", "")}]})
+        payload = {
+            "contents": contents,
+            "generationConfig": {
+                "temperature": settings.temperature,
+                "maxOutputTokens": settings.max_tokens,
+            },
+        }
+        url = (
+            settings.gemini_base_url.rstrip("/")
+            + f"/models/{settings.gemini_model}:generateContent"
+            + f"?key={urllib.parse.quote(settings.gemini_api_key)}"
+        )
+        return urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+    def complete(self, messages: list[Message]) -> str:
+        request = self._request(messages)
+        try:
+            with urllib.request.urlopen(request, timeout=120) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")[:400]
+            raise LLMUnavailable(f"Gemini error {exc.code}: {body}") from exc
+        except urllib.error.URLError as exc:
+            raise LLMUnavailable(f"Gemini unreachable: {exc.reason}") from exc
+        try:
+            return data["candidates"][0]["content"]["parts"][0]["text"]
+        except (KeyError, IndexError, TypeError):
+            raise LLMUnavailable(f"Gemini returned no text: {json.dumps(data)[:300]}")
+
+    def stream(self, messages: list[Message]) -> Iterator[str]:
+        yield self.complete(messages)
+
+
 class AgnesProvider(BaseProvider):
     """Agnes AI — OpenAI-compatible chat completions with SSE streaming."""
 
@@ -204,6 +277,7 @@ class AgnesProvider(BaseProvider):
 _PROVIDERS: dict[str, BaseProvider] = {
     LocalProvider.id: LocalProvider(),
     AgnesProvider.id: AgnesProvider(),
+    GeminiProvider.id: GeminiProvider(),
     MockProvider.id: MockProvider(),
 }
 

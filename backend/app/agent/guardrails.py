@@ -18,9 +18,18 @@ import time
 from dataclasses import dataclass, field
 
 from ..config import settings
+from ..workspace import workspace_root
 
 # Commands that can destroy the host, escape the workspace, or hijack the
 # panel. Matched against the raw command string AND the parsed argv.
+#
+# NOTE on "/home/container": the pattern below used to be a blind substring
+# match, which also caught Myra's own workspace whenever the default
+# MYRA_WORKSPACE_DIR (/home/container/myra) appears in a command — e.g. an
+# absolute `cd`, or `npm install` run with that cwd — blocking Myra from
+# operating in its own sandbox. screen_command() now strips out mentions of
+# the workspace root before running this pattern, so only references to
+# panel files *outside* the workspace still trip it.
 DENY_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"\brm\s+(-[a-zA-Z]*\s+)*/(\s|$)", "refusing to delete the filesystem root"),
     (r"\brm\s+-[a-zA-Z]*r[a-zA-Z]*f?\s+(~|/home|/etc|/var|/usr|/bin)", "refusing to delete system paths"),
@@ -57,7 +66,7 @@ SENSITIVE_BINARIES = {
     "apt-get",
     "docker",
     "make",
-    "psql",
+    "sqlite3",
 }
 
 
@@ -82,8 +91,26 @@ def screen_command(command: str, *, approved: bool = False) -> None:
         raise CommandBlocked("Command is too long.")
 
     lowered = text.lower()
+
+    # Blank out mentions of Myra's own workspace root before running the
+    # panel-protection patterns below. The default workspace lives INSIDE
+    # /home/container (a subfolder of the panel root — see config.py), so
+    # without this every install/build/delete command Myra runs in its own
+    # sandbox — anything with an absolute cwd, e.g. `cd /home/container/myra
+    # && npm install` — would otherwise match "/home/container" and get
+    # blocked, even though the workspace itself is exactly where Myra is
+    # supposed to operate. Only mentions of panel paths OUTSIDE the
+    # workspace should still trip these patterns.
+    screened = lowered
+    try:
+        workspace = str(workspace_root()).lower()
+    except OSError:
+        workspace = ""
+    if workspace:
+        screened = screened.replace(workspace, "")
+
     for pattern, reason in DENY_PATTERNS:
-        if re.search(pattern, lowered):
+        if re.search(pattern, screened):
             raise CommandBlocked(f"Blocked by guardrails ({reason}): {text}")
 
     try:

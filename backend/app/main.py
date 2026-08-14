@@ -262,9 +262,7 @@ async def lifespan(_app: FastAPI):
     init_db()
     ram = detect_total_ram_gb()
     tier = select_tier(ram)
-    logger.info(
-        "Database: %s", "sqlite (%s)" % settings.sqlite_path if settings.is_sqlite else "postgresql"
-    )
+    logger.info("Database: sqlite (%s)", settings.sqlite_path)
     logger.info("Detected RAM: %.2f GB -> tier '%s' (%s)", ram, tier.name, tier.description)
     logger.info("Agent workspace: %s", workspace_root())
     start_scheduler()
@@ -323,7 +321,7 @@ def health() -> dict:
         pass
     return {
         "status": "ok",
-        "database": "sqlite" if settings.is_sqlite else "postgresql",
+        "database": "sqlite",
         "llm_backend": settings.llm_backend,
         "tunnel_url": tunnel_url,
     }

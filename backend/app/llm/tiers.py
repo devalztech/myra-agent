@@ -190,7 +190,25 @@ def select_tier(total_ram_gb: float | None = None) -> ModelTier:
     if settings.gpu_layers != 0:
         cap = float("inf")
 
-    chosen = TIERS[0]  # nano is the floor — always runnable
+    # A very constrained panel (the 3 GB / 2-core class this app targets)
+    # should not reach for the biggest model that technically fits: CPU
+    # token rate collapses and the box swaps. Prefer the SMALLEST tier that
+    # fits whenever usable RAM is small, so it "swims" instead of thrashing.
+    tight_panel = usable < 2.5
+
+    if tight_panel:
+        # Fastest-first: return the smallest tier that fits, because on a
+        # tight panel a smaller model is strictly better than a barely-
+        # fitting bigger one.
+        for tier in TIERS:
+            if tier.size_gb > cap:
+                continue
+            needed = max(tier.min_ram_gb, tier.size_gb + kv_cache_gb(tier.context_size) + 0.35)
+            if usable >= needed:
+                return tier
+        return TIERS[0]  # coder-nano floor — always runnable
+
+    chosen = TIERS[0]  # floor — always runnable
     for tier in TIERS:
         if tier.size_gb > cap:
             continue

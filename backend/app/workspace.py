@@ -32,22 +32,38 @@ def workspace_root() -> Path:
     return root.resolve()
 
 
-def _protected_roots() -> list[Path]:
-    roots: list[Path] = []
-    for raw in settings.protected_paths:
-        try:
-            roots.append(Path(raw).expanduser().resolve())
-        except OSError:
-            continue
-    return roots
-
-
 def _is_within(child: Path, parent: Path) -> bool:
     try:
         child.relative_to(parent)
         return True
     except ValueError:
         return False
+
+
+def _protected_roots() -> list[Path]:
+    """Protected paths, with Myra's own workspace carved back out.
+
+    The default workspace (``/home/container/myra``) is deliberately a
+    *subfolder inside* one of the default protected paths
+    (``/home/container``, the Pterodactyl panel root) — see config.py. A
+    plain containment check would then treat Myra's own directory as
+    protected too, blocking every install/build/delete tool from working
+    at all inside the one place they're supposed to. So: a protected root
+    is skipped here if the workspace root sits inside it (the workspace is
+    carved out of that root, everything else in it stays protected), and
+    skipped outright if it exactly equals the workspace root.
+    """
+    root = workspace_root()
+    roots: list[Path] = []
+    for raw in settings.protected_paths:
+        try:
+            protected = Path(raw).expanduser().resolve()
+        except OSError:
+            continue
+        if protected == root or _is_within(root, protected):
+            continue
+        roots.append(protected)
+    return roots
 
 
 def safe_path(raw: str | os.PathLike[str], *, must_exist: bool = False) -> Path:

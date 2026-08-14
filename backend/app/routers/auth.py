@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..database import get_db
 from ..deps import get_current_user
 from ..models import User
@@ -29,6 +30,11 @@ def _auth_response(user: User) -> AuthResponse:
 @router.post("/register", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
 def register(payload: RegisterPayload, db: Session = Depends(get_db)) -> AuthResponse:
     email = _normalise(payload.email)
+    if not settings.is_email_allowed(email):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This email is not permitted to register.",
+        )
     exists = db.scalar(select(User).where(func.lower(User.email) == email))
     if exists is not None:
         raise HTTPException(

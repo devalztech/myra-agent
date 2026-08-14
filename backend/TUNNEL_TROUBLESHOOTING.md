@@ -44,7 +44,7 @@ Note the quick-tunnel branch had the same `http://localhost:{port}` bug.
   502/503/504, the exact dashboard/DNS steps to fix — instead of failing
   silently like before.
 
-Nothing else changed: routes, auth, JWT, SQLite/Postgres selection, LLM tiers,
+Nothing else changed: routes, auth, JWT, SQLite storage, LLM tiers,
 model download and the quick-tunnel fallback all behave as before.
 
 ## Verified end to end over the real tunnel

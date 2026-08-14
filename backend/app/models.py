@@ -87,6 +87,10 @@ class Memory(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
+    # Soft-delete: forgetting a memory sets this instead of removing the
+    # row, so an accidental `forget` (by the agent or the user) is
+    # recoverable. Trash is purged for real after MEMORY_TRASH_TTL_DAYS.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ScheduledTask(Base):

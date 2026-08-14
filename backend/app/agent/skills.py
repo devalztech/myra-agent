@@ -47,9 +47,10 @@ SKILLS: dict[str, str] = {
 - Prefer `timestamptz`, `numeric` for money, `uuid` for keys.""",
     "sqlite": """SQLite
 - Enable `PRAGMA foreign_keys = ON` and WAL mode for concurrency.
-- Use it as the fallback/embedded store; keep SQL portable to Postgres.
 - One writer at a time — wrap writes in short transactions.
-- `INTEGER PRIMARY KEY` is the rowid alias; use TEXT for uuids.""",
+- `INTEGER PRIMARY KEY` is the rowid alias; use TEXT for uuids.
+- Myra's own database (users/sessions/memories) is SQLite-only — don't
+  suggest Postgres for it unless the user explicitly asks to change that.""",
     "python": """Python 3.11+
 - Type hints everywhere; `from __future__ import annotations`.
 - Prefer dataclasses/pydantic over dicts for structured data.

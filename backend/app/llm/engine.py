@@ -205,6 +205,26 @@ class LlamaCppEngine(BaseEngine):
                     use_mlock=settings.use_mlock,
                     verbose=settings.debug,
                 )
+                if settings.llm_kv_cache:
+                    # Explicit longest-common-prefix cache. create_chat_completion()
+                    # re-renders the whole message list into a prompt string on
+                    # every call, and low-level eval() only reuses KV state when
+                    # the newly tokenized prompt shares a prefix with the last
+                    # one it saw — relying on that happening implicitly is
+                    # fragile (a different chat-template code path, a second
+                    # concurrent caller, anything touching self._llm in between,
+                    # and the match silently misses). LlamaCache makes the
+                    # reuse explicit and guaranteed: it snapshots state keyed by
+                    # token-prefix match, independent of how the prompt string
+                    # was assembled. This is what actually pays off within one
+                    # agent run — system prompt + workspace context is built
+                    # once per run and the transcript only grows by append
+                    # after that (see agent/loop.py), so each successive tool
+                    # step re-ingests just its own new tail instead of the
+                    # whole prompt again.
+                    from llama_cpp import LlamaCache
+
+                    self._llm.set_cache(LlamaCache(capacity_bytes=settings.llm_kv_cache_bytes))
             except Exception as exc:
                 self._status = "error"
                 self._detail = f"Failed to load {path.name}: {exc}"

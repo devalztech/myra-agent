@@ -13,7 +13,8 @@ Groups:
   * network    — http_fetch, web_search
   * browser    — open a page, read text, screenshot (Playwright when present)
   * media      — read an image (metadata + OCR-free description hook)
-  * memory     — remember / recall user preferences and conventions
+  * memory     — remember / recall / forget user preferences and conventions
+                 (forget is a soft-delete; see app.agent.memory.MemoryStore)
   * skills     — look up a built-in language/framework skill sheet
 """
 
@@ -37,6 +38,7 @@ from typing import Any, Callable
 from ..config import settings
 from ..workspace import UnsafePath, ensure_parent, relative, safe_path, workspace_root
 from .guardrails import CommandBlocked, screen_command, truncate
+from .memory import TRASH_TTL_DAYS
 
 SKIP_DIRS = {
     ".git",
@@ -644,6 +646,25 @@ def recall(query: str = "", _memory=None) -> list[dict[str, str]]:
 
 
 @tool(
+    "forget",
+    "Forget a remembered preference or convention by its key. This is "
+    "recoverable — the memory goes to trash and can be restored later — "
+    "it is not a permanent delete.",
+    _obj({"key": _str("The exact key used when it was remembered.")}, ["key"]),
+    label="Forgetting memory",
+    mutates=True,
+)
+def forget(key: str, _memory=None) -> str:
+    if _memory is None:
+        raise RuntimeError("Memory store unavailable.")
+    match = next((m for m in _memory.search(key) if m["key"] == key), None)
+    if match is None:
+        return f"No memory found for key: {key}"
+    _memory.forget(match["id"])
+    return f"Forgot {key} (recoverable from trash for {TRASH_TTL_DAYS} days)."
+
+
+@tool(
     "get_skill",
     "Load Myra's built-in skill sheet for a language or framework (javascript, typescript, react, node, express, postgresql, sqlite, python, cpp, html, css).",
     _obj({"name": _str("Skill name.")}, ["name"]),
@@ -671,7 +692,7 @@ def call_tool(name: str, arguments: dict[str, Any], *, memory: Any = None) -> An
     if tool_def is None:
         raise KeyError(f"Unknown tool: {name}")
     kwargs = dict(arguments or {})
-    if name in {"remember", "recall"}:
+    if name in {"remember", "recall", "forget"}:
         kwargs["_memory"] = memory
     return tool_def.handler(**kwargs)
 

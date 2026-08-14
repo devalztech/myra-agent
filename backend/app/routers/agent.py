@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterator
+import threading
+from collections.abc import AsyncIterator
 from datetime import timedelta
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -130,6 +131,31 @@ def skills() -> dict[str, object]:
 # agent run (SSE)
 # --------------------------------------------------------------------------
 
+# Explicit-stop registry, keyed by session id. A bare dropped connection
+# (phone locks, wifi drops, tab closed) is NOT in here — the run keeps going
+# and finishes unattended so the user comes back to a completed task instead
+# of one abandoned half-way through. Only a deliberate call to
+# POST /sessions/{id}/stop adds an entry, which the running generator polls
+# for and honours as "the user actually asked me to stop." Process-local by
+# design: a run and its Stop button always live in the same process.
+_stop_requested: set[str] = set()
+_stop_lock = threading.Lock()
+
+
+def _request_stop(session_id: str) -> None:
+    with _stop_lock:
+        _stop_requested.add(session_id)
+
+
+def _consume_stop(session_id: str) -> bool:
+    with _stop_lock:
+        return session_id in _stop_requested
+
+
+def _clear_stop(session_id: str) -> None:
+    with _stop_lock:
+        _stop_requested.discard(session_id)
+
 
 class AgentRunPayload(BaseModel):
     content: str = Field(min_length=1, max_length=16000)
@@ -141,10 +167,27 @@ def _sse(event: dict[str, object]) -> str:
     return f"data: {json.dumps(event)}\n\n"
 
 
+@router.post("/sessions/{session_id}/stop", status_code=status.HTTP_202_ACCEPTED)
+def stop_agent(
+    session_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+) -> dict[str, object]:
+    """Explicit stop, distinct from a dropped connection.
+
+    A closed SSE stream alone no longer halts a run (see run_agent below) —
+    it finishes the task in the background so a flaky connection can't
+    strand it mid-edit. This is the only thing that actually interrupts a
+    run early, e.g. from the UI's Stop button.
+    """
+    get_owned_session(session_id, db, user)
+    _request_stop(session_id)
+    return {"stopped": session_id}
+
+
 @router.post("/sessions/{session_id}/agent")
 def run_agent(
     session_id: str,
     payload: AgentRunPayload,
+    request: Request,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> StreamingResponse:
@@ -176,7 +219,7 @@ def run_agent(
     # ORM instances detach once the generator starts streaming.
     user_id = user.id
 
-    def stream() -> Iterator[str]:
+    async def stream() -> AsyncIterator[str]:
         # A fresh DB session: the request-scoped one closes when the generator
         # starts streaming outside the dependency scope.
         local_db = SessionLocal()
@@ -194,17 +237,32 @@ def run_agent(
 
             events: list[dict[str, object]] = []
             final_text = ""
+            client_gone = False
+            user_stopped = False
             for event in runner.run(prompt, history):
                 data = event.dict()
                 events.append(data)
                 if event.type == "final":
                     final_text = str(event.data.get("text", ""))
-                yield _sse(data)
+                # A dropped/closed connection (phone locked, tab closed, wifi
+                # blip) does NOT stop the run — Myra keeps working and the
+                # full step-by-step trace is saved below via AgentEventRow,
+                # so GET /sessions/{id}/events replays everything that
+                # happened once the user is back online. Only an EXPLICIT
+                # stop (POST /sessions/{id}/stop, wired to the UI's Stop
+                # button) breaks the loop early.
+                if not client_gone and await request.is_disconnected():
+                    client_gone = True
+                if not client_gone:
+                    yield _sse(data)
+                if _consume_stop(session_id):
+                    user_stopped = True
+                    break
 
             assistant = ChatMessage(
                 session_id=session_id,
                 role="assistant",
-                content=final_text or "(no reply)",
+                content=final_text or ("(stopped)" if user_stopped else "(no reply)"),
             )
             local_db.add(assistant)
             local_db.commit()
@@ -220,6 +278,8 @@ def run_agent(
                 )
             stored = local_db.get(ChatMessage, assistant.id)
             local_db.commit()
+            if client_gone:
+                return  # nothing left listening — the trace is saved for replay
             yield _sse(
                 {
                     "type": "done",
@@ -235,6 +295,7 @@ def run_agent(
             logger.exception("Agent run failed")
             yield _sse({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
         finally:
+            _clear_stop(session_id)
             local_db.close()
 
     return StreamingResponse(
@@ -310,8 +371,49 @@ def create_memory(
 def delete_memory(
     memory_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
 ) -> None:
+    """Soft-delete: moves the memory to trash. Recoverable via restore below."""
     if not MemoryStore(db=db, user_id=user.id).forget(memory_id):
         raise HTTPException(status_code=404, detail="Memory not found.")
+
+
+@router.get("/memories/trash")
+def list_trashed_memories(
+    db: Session = Depends(get_db), user: User = Depends(get_current_user)
+) -> dict[str, object]:
+    store = MemoryStore(db=db, user_id=user.id)
+    return {
+        "memories": [
+            {
+                "id": m.id,
+                "key": m.key,
+                "value": m.value,
+                "kind": m.kind,
+                "deletedAt": m.deleted_at.isoformat() if m.deleted_at else None,
+            }
+            for m in store.trash()
+        ]
+    }
+
+
+@router.post("/memories/{memory_id}/restore")
+def restore_memory(
+    memory_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+) -> dict[str, object]:
+    entry = MemoryStore(db=db, user_id=user.id).restore(memory_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="No trashed memory with that id.")
+    return {"id": entry.id, "key": entry.key, "value": entry.value, "kind": entry.kind}
+
+
+@router.delete(
+    "/memories/{memory_id}/purge", status_code=status.HTTP_204_NO_CONTENT, response_model=None
+)
+def purge_memory(
+    memory_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+) -> None:
+    """Permanent delete of an already-trashed memory. Cannot be undone."""
+    if not MemoryStore(db=db, user_id=user.id).purge(memory_id):
+        raise HTTPException(status_code=404, detail="No trashed memory with that id.")
 
 
 # --------------------------------------------------------------------------

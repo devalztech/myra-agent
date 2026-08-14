@@ -142,6 +142,33 @@ def test_chat_stream_emits_sse_events(client, auth):
     assert detail["messages"][1]["content"]
 
 
+def test_agent_run_emits_sse_events_and_persists(client, auth):
+    """The agent endpoint streams run_start/final/done and survives a full
+    read to completion (the `is_disconnected()` check added for the Stop
+    button must not fire, or terminate the run, on a normal request)."""
+    token, _, _ = auth
+    session_id = client.post("/sessions", headers=headers(token), json={}).json()["id"]
+
+    with client.stream(
+        "POST",
+        f"/sessions/{session_id}/agent",
+        headers=headers(token),
+        json={"content": "Say hello.", "approved": True},
+    ) as res:
+        assert res.status_code == 200
+        assert res.headers["content-type"].startswith("text/event-stream")
+        raw = "".join(res.iter_text())
+
+    assert '"type": "run_start"' in raw
+    assert '"type": "final"' in raw
+    assert '"type": "done"' in raw
+    assert '"type": "error"' not in raw
+
+    detail = client.get(f"/sessions/{session_id}", headers=headers(token)).json()
+    assert [m["role"] for m in detail["messages"]] == ["user", "assistant"]
+    assert detail["messages"][1]["content"]
+
+
 def test_chat_requires_auth_and_valid_session(client, auth):
     token, _, _ = auth
     assert client.post("/sessions/nope/chat", json={"content": "hi"}).status_code == 401

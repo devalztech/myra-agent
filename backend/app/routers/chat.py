@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterator
+from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -118,6 +118,7 @@ def _sse(event: str, data: dict) -> str:
 def chat_stream(
     session_id: str,
     payload: ChatPayload,
+    request: Request,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> StreamingResponse:
@@ -131,7 +132,7 @@ def chat_stream(
         "createdAt": user_message.created_at.isoformat(),
     }
 
-    def generate() -> Iterator[str]:
+    async def generate() -> AsyncIterator[str]:
         yield _sse("session", {"id": session_id, "title": session_title})
         yield _sse("user_message", user_message_payload)
 
@@ -147,10 +148,17 @@ def chat_stream(
                 },
             )
         pieces: list[str] = []
+        stopped = False
         try:
-            for token in engine.stream(build_messages(history, payload.content)):
+            for index, token in enumerate(engine.stream(build_messages(history, payload.content))):
                 pieces.append(token)
                 yield _sse("token", {"token": token})
+                # Check every few tokens rather than every single one — the
+                # user tapped Stop / closed the tab, so no one is listening
+                # for further tokens and local inference can be abandoned.
+                if index % 8 == 0 and await request.is_disconnected():
+                    stopped = True
+                    break
         except LLMUnavailable as exc:
             yield _sse("error", {"message": str(exc)})
             return
@@ -159,7 +167,7 @@ def chat_stream(
             yield _sse("error", {"message": "Local model failed to generate a response."})
             return
 
-        reply = "".join(pieces).strip() or "(empty response)"
+        reply = "".join(pieces).strip() or ("(stopped)" if stopped else "(empty response)")
         # Fresh session: the request-scoped one may already be closed mid-stream.
         with SessionLocal() as write_db:
             assistant = ChatMessage(session_id=session_id, role="assistant", content=reply)
@@ -175,6 +183,8 @@ def chat_stream(
                 "content": assistant.content,
                 "createdAt": assistant.created_at.isoformat(),
             }
+        if stopped:
+            return  # nothing left listening — skip the final SSE writes
         yield _sse("assistant_message", payload_out)
         yield _sse("done", {"ok": True})
 

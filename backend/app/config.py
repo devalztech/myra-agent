@@ -84,11 +84,32 @@ class Settings:
         raw_origins = _env("MYRA_CORS_ORIGINS", "*")
         self.cors_origins = [o.strip() for o in raw_origins.split(",") if o.strip()] or ["*"]
 
-        # --- database ----------------------------------------------------
-        # PostgreSQL when DATABASE_URL (or the discrete POSTGRES_* vars) is set,
-        # otherwise a SQLite file at <repo>/database/myra.db
+        # --- registration allowlist ---------------------------------------
+        # Comma-separated list of exact emails ("a@b.com") and/or bare
+        # domains ("@company.com" or "company.com") permitted to register.
+        # Empty (default) = open registration, unchanged from before.
+        # Matching is case-insensitive; entries are normalised at parse time
+        # so comparisons at request time are a plain set/suffix check.
+        raw_allowed = _env("MYRA_ALLOWED_EMAILS") or _env("MYRA_EMAIL_ALLOWLIST")
+        self.allowed_emails: set[str] = set()
+        self.allowed_email_domains: set[str] = set()
+        for entry in raw_allowed.split(","):
+            entry = entry.strip().lower()
+            if not entry:
+                continue
+            if entry.startswith("@"):
+                self.allowed_email_domains.add(entry[1:])
+            elif "@" in entry:
+                self.allowed_emails.add(entry)
+            else:
+                # bare domain like "company.com" -> treat as @company.com
+                self.allowed_email_domains.add(entry)
+        self.registration_open = not (self.allowed_emails or self.allowed_email_domains)
+
+        # --- database (SQLite only) ---------------------------------------
         self.sqlite_path = Path(_env("MYRA_SQLITE_PATH") or (BASE_DIR / "database" / "myra.db"))
-        self.database_url = self._resolve_database_url()
+        self.sqlite_path.parent.mkdir(parents=True, exist_ok=True)
+        self.database_url = f"sqlite:///{self.sqlite_path}"
 
         # --- llm ---------------------------------------------------------
         # "llama_cpp" (default, local GGUF) or "mock" (deterministic, for tests)
@@ -130,6 +151,16 @@ class Settings:
         # default so a small panel can still page weights out under pressure).
         self.use_mmap = _env_bool("MYRA_USE_MMAP", True)
         self.use_mlock = _env_bool("MYRA_USE_MLOCK", False)
+        # Explicit prompt-prefix KV cache (see LlamaCache in llm/engine.py).
+        # Within one agent run the transcript only grows by append — same
+        # system prompt + workspace context, tool steps appended after —
+        # so this is what actually lets step 2/3/4 of a run skip
+        # re-ingesting everything step 1 already processed. Costs RAM
+        # (bounded by llm_kv_cache_bytes), so it's off by default on a
+        # tight panel; worth turning on anywhere multi-step agent runs are
+        # the common case rather than one-off replies.
+        self.llm_kv_cache = _env_bool("MYRA_LLM_KV_CACHE", False)
+        self.llm_kv_cache_bytes = _env_int("MYRA_LLM_KV_CACHE_MB", 512) * 1024 * 1024
 
         self.history_window = _env_int("MYRA_HISTORY_WINDOW", 20)
 
@@ -143,6 +174,16 @@ class Settings:
         # set explicitly. agnes-2.0-flash is the documented default model.
         self.agnes_base_url = _env("AGNES_BASE_URL", "https://apihub.agnes-ai.com/v1")
         self.agnes_model = _env("AGNES_MODEL", "agnes-2.0-flash")
+
+        # Google Generative Language API (v1beta) — switchable provider.
+        # Not keyless: Google always wants a key. Uses an optional
+        # GEMINI_API_KEY (or GOOGLE_API_KEY). When absent the provider stays
+        # visible and returns a clear "set GEMINI_API_KEY" message.
+        self.gemini_api_key = _env("GEMINI_API_KEY") or _env("GOOGLE_API_KEY")
+        self.gemini_base_url = _env(
+            "GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta"
+        )
+        self.gemini_model = _env("GEMINI_MODEL", "gemini-2.5-flash")
 
         # --- agent workspace ---------------------------------------------
         # Myra's OWN working directory: /home/container/myra by default —
@@ -160,7 +201,7 @@ class Settings:
             p.strip()
             for p in _env(
                 "MYRA_PROTECTED_PATHS",
-                "/home/container,/etc,/root/.ssh,/proc,/sys,/var/lib/pterodactyl",
+                "/etc,/root/.ssh,/proc,/sys,/var/lib/pterodactyl",
             ).split(",")
             if p.strip()
         ]
@@ -234,32 +275,23 @@ class Settings:
         return max(1, min(int(available), 16))
 
 
-    def _resolve_database_url(self) -> str:
-        url = _env("DATABASE_URL") or _env("MYRA_DATABASE_URL")
-        if not url:
-            host = _env("POSTGRES_HOST")
-            if host:
-                user = _env("POSTGRES_USER", "myra")
-                password = _env("POSTGRES_PASSWORD", "")
-                db = _env("POSTGRES_DB", "myra")
-                port = _env_int("POSTGRES_PORT", 5432)
-                auth = f"{user}:{password}" if password else user
-                url = f"postgresql+psycopg://{auth}@{host}:{port}/{db}"
-        if url:
-            # Normalise legacy schemes onto the psycopg (v3) driver.
-            if url.startswith("postgres://"):
-                url = url.replace("postgres://", "postgresql+psycopg://", 1)
-            elif url.startswith("postgresql://"):
-                url = url.replace("postgresql://", "postgresql+psycopg://", 1)
-            return url
-
-        # SQLite fallback.
-        self.sqlite_path.parent.mkdir(parents=True, exist_ok=True)
-        return f"sqlite:///{self.sqlite_path}"
-
     @property
     def is_sqlite(self) -> bool:
-        return self.database_url.startswith("sqlite")
+        # Kept as a property (rather than deleted outright) so main.py's
+        # boot log / health payload and any other call site don't need to
+        # change now that SQLite is the only backend — it always returns
+        # True, but the call sites stay honest about what they're checking.
+        return True
+
+    def is_email_allowed(self, email: str) -> bool:
+        """True if registration is open, or the email clears the allowlist."""
+        if self.registration_open:
+            return True
+        email = (email or "").strip().lower()
+        if email in self.allowed_emails:
+            return True
+        domain = email.rsplit("@", 1)[-1] if "@" in email else ""
+        return domain in self.allowed_email_domains
 
 
 @lru_cache(maxsize=1)

@@ -4,7 +4,6 @@ pydantic==2.10.4
 pydantic[email]==2.10.4
 email-validator==2.2.0
 SQLAlchemy==2.0.36
-psycopg[binary]==3.2.3
 PyJWT==2.10.1
 bcrypt==4.2.1
 python-dotenv==1.0.1
