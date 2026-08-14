@@ -9,6 +9,24 @@ export function fetchAgentSettings(token: string): Promise<AgentSettings> {
   return apiRequest<AgentSettings>("/settings", { token });
 }
 
+export function fetchProviderConfigs(
+  token: string,
+): Promise<{ providers: Record<string, { apiKey?: string | null; baseUrl?: string | null; model?: string | null; hasKey: boolean }> }> {
+  return apiRequest("/settings/providers", { token });
+}
+
+export function saveProviderConfig(
+  token: string,
+  provider: string,
+  cfg: { apiKey?: string; baseUrl?: string; model?: string },
+): Promise<{ provider: string; saved: boolean }> {
+  return apiRequest(`/settings/providers/${provider}`, {
+    method: "PUT",
+    token,
+    body: { provider, ...cfg },
+  });
+}
+
 export function updateAgentSettings(
   token: string,
   patch: Partial<Pick<AgentSettings, "provider" | "approvalRequired" | "maxToolCalls" | "agentMode">>,

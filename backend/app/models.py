@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -124,10 +124,12 @@ class UserSettings(Base):
     user_id: Mapped[str] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
     )
-    provider: Mapped[str] = mapped_column(String(32), default="local")
+    provider: Mapped[str] = mapped_column(String(32), default="groq")
     approval_required: Mapped[bool] = mapped_column(Boolean, default=False)
     max_tool_calls: Mapped[int] = mapped_column(Integer, default=0)
     agent_mode: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Per-provider overrides: { provider_id: { api_key?, base_url?, model? } }
+    provider_configs: Mapped[dict] = mapped_column(JSON, default=dict)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )

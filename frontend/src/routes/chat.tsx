@@ -30,9 +30,11 @@ import {
 
 import {
   fetchAgentSettings,
+  fetchProviderConfigs,
   fetchProviders,
   fetchSessionEvents,
   runAgent,
+  saveProviderConfig as saveProviderConfigApi,
   stopAgent,
   updateAgentSettings,
   uploadWorkspaceFile,
@@ -215,6 +217,8 @@ function ChatPage() {
   const [model, setModel] = useState<ModelStatus | null>(null);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [settings, setSettings] = useState<AgentSettings | null>(null);
+  const [showApiKeys, setShowApiKeys] = useState(false);
+  const [providerConfigs, setProviderConfigs] = useState<Record<string, { apiKey?: string | null; baseUrl?: string | null; model?: string | null; hasKey: boolean }>>({});
   const [notice, setNotice] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -367,6 +371,36 @@ function ChatPage() {
       setMenu(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not switch provider.");
+    }
+  };
+
+  const openApiKeys = async () => {
+    setShowApiKeys(true);
+    if (!token) return;
+    try {
+      const { providers: cfg } = await fetchProviderConfigs(token);
+      setProviderConfigs(cfg);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not load provider settings.");
+    }
+  };
+
+  const saveProviderConfig = async (provider: string) => {
+    if (!token) return;
+    const cfg = providerConfigs[provider] ?? {};
+    try {
+      await saveProviderConfigApi(token, provider, {
+        apiKey: cfg.apiKey ?? undefined,
+        baseUrl: cfg.baseUrl ?? undefined,
+        model: cfg.model ?? undefined,
+      });
+      setNotice(`Saved settings for ${providers.find((p) => p.id === provider)?.name ?? provider}.`);
+      setProviderConfigs((prev) => ({
+        ...prev,
+        [provider]: { ...(prev[provider] ?? {}), hasKey: Boolean(cfg.apiKey) },
+      }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save provider settings.");
     }
   };
 
@@ -798,6 +832,15 @@ function ChatPage() {
                     {settings?.agentMode === false ? "Off" : "On"}
                   </span>
                 </button>
+
+                <button
+                  type="button"
+                  onClick={() => void openApiKeys()}
+                  className="focus-royal flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-[0.9375rem] transition-colors hover:bg-surface-raised"
+                >
+                  <Cpu className="size-4 text-royal" />
+                  <span className="flex-1">API Keys & models</span>
+                </button>
                 <button
                   type="button"
                   onClick={toggleApprovals}
@@ -1010,6 +1053,103 @@ function ChatPage() {
             </div>
           </form>
         </div>
+
+        {/* API keys & model settings modal */}
+        {showApiKeys && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <button
+              type="button"
+              aria-label="Close"
+              className="fixed inset-0 cursor-default bg-black/70 backdrop-blur-sm"
+              onClick={() => setShowApiKeys(false)}
+            />
+            <div className="relative z-10 w-full max-w-lg max-h-[85vh] overflow-y-auto scroll-slim rounded-2xl bg-popover p-5 shadow-2xl shadow-black/60">
+              <div className="mb-4 flex items-center justify-between">
+                <h2 className="text-lg font-semibold tracking-tight text-foreground">
+                  API Keys & models
+                </h2>
+                <button
+                  type="button"
+                  onClick={() => setShowApiKeys(false)}
+                  className="rounded-lg p-1.5 text-muted-foreground hover:text-foreground"
+                >
+                  <X className="size-5" />
+                </button>
+              </div>
+
+              <p className="mb-4 text-[0.8125rem] text-muted-foreground">
+                Set your own API key, base URL and model per provider. Keys are
+                stored on your server, never shown in full.
+              </p>
+
+              <div className="space-y-4">
+                {providers
+                  .filter((p) => p.kind !== "mock")
+                  .map((provider) => {
+                    const cfg = providerConfigs[provider.id] ?? {};
+                    return (
+                      <div
+                        key={provider.id}
+                        className="rounded-xl border border-hairline bg-surface-raised/40 p-3.5"
+                      >
+                        <div className="mb-2 flex items-center justify-between">
+                          <span className="font-medium text-foreground">{provider.name}</span>
+                          <span className="text-[0.7rem] text-muted-foreground">
+                            {cfg.hasKey ? "✓ key set" : "no key"}
+                          </span>
+                        </div>
+                        <div className="space-y-2">
+                          <input
+                            type="password"
+                            placeholder={cfg.hasKey ? "Key set — leave blank to keep" : "API key"}
+                            value={cfg.apiKey ?? ""}
+                            onChange={(e) =>
+                              setProviderConfigs((prev) => ({
+                                ...prev,
+                                [provider.id]: { ...(prev[provider.id] ?? {}), apiKey: e.target.value },
+                              }))
+                            }
+                            className="w-full rounded-lg border border-hairline bg-surface px-3 py-2 text-[0.8125rem] text-foreground outline-none focus:border-royal/50"
+                          />
+                          <input
+                            type="text"
+                            placeholder="Base URL (optional)"
+                            value={cfg.baseUrl ?? ""}
+                            onChange={(e) =>
+                              setProviderConfigs((prev) => ({
+                                ...prev,
+                                [provider.id]: { ...(prev[provider.id] ?? {}), baseUrl: e.target.value },
+                              }))
+                            }
+                            className="w-full rounded-lg border border-hairline bg-surface px-3 py-2 text-[0.8125rem] text-foreground outline-none focus:border-royal/50"
+                          />
+                          <input
+                            type="text"
+                            placeholder="Model (optional — defaults used if blank)"
+                            value={cfg.model ?? ""}
+                            onChange={(e) =>
+                              setProviderConfigs((prev) => ({
+                                ...prev,
+                                [provider.id]: { ...(prev[provider.id] ?? {}), model: e.target.value },
+                              }))
+                            }
+                            className="w-full rounded-lg border border-hairline bg-surface px-3 py-2 text-[0.8125rem] text-foreground outline-none focus:border-royal/50"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => void saveProviderConfig(provider.id)}
+                            className="w-full rounded-lg bg-royal px-3 py-2 text-[0.8125rem] font-medium text-primary-foreground transition-opacity hover:opacity-90"
+                          >
+                            Save {provider.name}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

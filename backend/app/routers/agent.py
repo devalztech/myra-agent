@@ -46,6 +46,13 @@ class SettingsPayload(BaseModel):
     agentMode: bool | None = None
 
 
+class ProviderConfigPayload(BaseModel):
+    provider: str
+    apiKey: str | None = None
+    baseUrl: str | None = None
+    model: str | None = None
+
+
 def _settings_row(db: Session, user: User) -> UserSettings:
     row = db.get(UserSettings, user.id)
     if row is None:
@@ -69,6 +76,57 @@ def _settings_out(row: UserSettings) -> dict[str, object]:
             "agentTimeoutSeconds": settings.agent_timeout_seconds,
         },
     }
+
+
+def _mask_key(key: str | None) -> str | None:
+    if not key:
+        return None
+    if len(key) <= 8:
+        return "••••"
+    return f"{key[:4]}…{key[-4:]}"
+
+
+@router.get("/settings/providers")
+def read_provider_configs(
+    db: Session = Depends(get_db), user: User = Depends(get_current_user)
+) -> dict[str, object]:
+    row = _settings_row(db, user)
+    configs = dict(row.provider_configs or {})
+    # Return masked keys so the UI can show "set" without leaking secrets.
+    masked: dict[str, object] = {}
+    for pid, cfg in configs.items():
+        masked[pid] = {
+            "apiKey": _mask_key(cfg.get("api_key")) if isinstance(cfg, dict) else None,
+            "baseUrl": cfg.get("base_url") if isinstance(cfg, dict) else None,
+            "model": cfg.get("model") if isinstance(cfg, dict) else None,
+            "hasKey": bool(isinstance(cfg, dict) and cfg.get("api_key")),
+        }
+    return {"providers": masked}
+
+
+@router.put("/settings/providers/{provider_id}")
+def update_provider_config(
+    provider_id: str,
+    payload: ProviderConfigPayload,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, object]:
+    known = {p["id"] for p in list_providers()}
+    if provider_id not in known:
+        raise HTTPException(status_code=400, detail="Unknown provider.")
+    row = _settings_row(db, user)
+    configs = dict(row.provider_configs or {})
+    current = dict(configs.get(provider_id, {}) or {})
+    if payload.apiKey is not None:
+        current["api_key"] = payload.apiKey
+    if payload.baseUrl is not None:
+        current["base_url"] = payload.baseUrl
+    if payload.model is not None:
+        current["model"] = payload.model
+    configs[provider_id] = current
+    row.provider_configs = configs
+    db.commit()
+    return {"provider": provider_id, "saved": True}
 
 
 @router.get("/providers")
@@ -226,8 +284,17 @@ def run_agent(
         try:
             memory = MemoryStore(db=local_db, user_id=user_id)
 
+            provider = get_provider(provider_id)
+            # Apply the user's saved per-provider config (key/base-url/model).
+            user_cfg = (row.provider_configs or {}).get(provider_id, {})
+            if user_cfg and hasattr(provider, "configure"):
+                provider.configure(
+                    api_key=user_cfg.get("api_key"),
+                    base_url=user_cfg.get("base_url"),
+                    model=user_cfg.get("model"),
+                )
             runner = AgentRunner(
-                provider=get_provider(provider_id),
+                provider=provider,
                 memory=memory,
                 budget=budget,
                 approved=payload.approved,

@@ -255,17 +255,45 @@ class OpenAICompatibleProvider(BaseProvider):
 
     kind = "remote"
 
+    # Per-request overrides set by the UI (per-user provider settings).
+    # api_key / base_url / model. Cleared after each run.
+    def configure(self, *, api_key: str | None = None,
+                  base_url: str | None = None, model: str | None = None) -> None:
+        self._override_key = api_key
+        self._override_url = base_url
+        self._override_model = model
+
+    def _clear_override(self) -> None:
+        self._override_key = None
+        self._override_url = None
+        self._override_model = None
+
     # --- subclass overrides ---------------------------------------------
     @property
     def api_key(self) -> str:
+        if getattr(self, "_override_key", None):
+            return self._override_key
+        return self._default_api_key
+
+    def _default_api_key(self) -> str:
         raise NotImplementedError
 
     @property
     def base_url(self) -> str:
+        if getattr(self, "_override_url", None):
+            return self._override_url
+        return self._default_base_url
+
+    def _default_base_url(self) -> str:
         raise NotImplementedError
 
     @property
     def model_name(self) -> str:
+        if getattr(self, "_override_model", None):
+            return self._override_model
+        return self._default_model
+
+    def _default_model(self) -> str:
         raise NotImplementedError
 
     _timeout = 180
@@ -354,15 +382,15 @@ class GroqProvider(OpenAICompatibleProvider):
     _timeout = 180
 
     @property
-    def api_key(self) -> str:
+    def _default_api_key(self) -> str:
         return settings.groq_api_key
 
     @property
-    def base_url(self) -> str:
+    def _default_base_url(self) -> str:
         return settings.groq_base_url
 
     @property
-    def model_name(self) -> str:
+    def _default_model(self) -> str:
         return settings.groq_model
 
 
@@ -372,15 +400,15 @@ class SambaNovaProvider(OpenAICompatibleProvider):
     _timeout = 180
 
     @property
-    def api_key(self) -> str:
+    def _default_api_key(self) -> str:
         return settings.sambanova_api_key
 
     @property
-    def base_url(self) -> str:
+    def _default_base_url(self) -> str:
         return settings.sambanova_base_url
 
     @property
-    def model_name(self) -> str:
+    def _default_model(self) -> str:
         return settings.sambanova_model
 
 
@@ -390,15 +418,15 @@ class ScalewayProvider(OpenAICompatibleProvider):
     _timeout = 180
 
     @property
-    def api_key(self) -> str:
+    def _default_api_key(self) -> str:
         return settings.scaleway_api_key
 
     @property
-    def base_url(self) -> str:
+    def _default_base_url(self) -> str:
         return settings.scaleway_base_url
 
     @property
-    def model_name(self) -> str:
+    def _default_model(self) -> str:
         return settings.scaleway_model
 
 
