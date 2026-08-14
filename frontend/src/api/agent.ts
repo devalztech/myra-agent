@@ -72,6 +72,30 @@ export async function downloadWorkspaceFile(token: string, path: string): Promis
   anchor.remove();
   URL.revokeObjectURL(url);
 }
+
+/** Uploads a file into the agent's workspace and returns its stored path. */
+export async function uploadWorkspaceFile(
+  token: string,
+  file: File,
+): Promise<{ path: string; bytes: number }> {
+  const form = new FormData();
+  form.append("file", file);
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}/workspace/upload`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    });
+  } catch {
+    throw new ApiError("Cannot reach the Myra backend. Please try again.", 0);
+  }
+  if (!response.ok) {
+    throw new ApiError(await errorMessage(response), response.status);
+  }
+  return (await response.json()) as { path: string; bytes: number };
+}
+
 export async function runAgent(
   token: string,
   sessionId: string,

@@ -32,8 +32,6 @@ from fastapi.middleware.cors import CORSMiddleware
 # already reflecting .env, regardless of how this file was invoked.
 from app.config import settings
 from app.database import init_db
-from app.llm.engine import get_engine
-from app.llm.tiers import detect_total_ram_gb, select_tier
 from app.routers import agent as agent_router
 from app.routers import auth, chat, sessions
 from app.scheduler import start_scheduler
@@ -260,33 +258,10 @@ def _start_cloudflare_tunnel(port: int) -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
-    ram = detect_total_ram_gb()
-    tier = select_tier(ram)
     logger.info("Database: sqlite (%s)", settings.sqlite_path)
-    logger.info("Detected RAM: %.2f GB -> tier '%s' (%s)", ram, tier.name, tier.description)
     logger.info("Agent workspace: %s", workspace_root())
     start_scheduler()
     _start_cloudflare_tunnel(settings.port)
-    if settings.preload_model:
-        # Load in a daemon thread so boot (and /health) never blocks on a
-        # multi-GB model load or download, while still making sure the first
-        # real chat message doesn't pay the cold-start cost.
-        import threading as _threading
-
-        def _preload() -> None:
-            try:
-                engine = get_engine()
-                loader = getattr(engine, "load", None)
-                if callable(loader):
-                    import time as _time
-
-                    started = _time.time()
-                    loader()
-                    logger.info("Model preloaded in %.1fs", _time.time() - started)
-            except Exception as exc:  # pragma: no cover
-                logger.warning("Model preload skipped: %s", exc)
-
-        _threading.Thread(target=_preload, daemon=True, name="myra-preload").start()
     yield
 
 

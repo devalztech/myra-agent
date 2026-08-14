@@ -80,35 +80,6 @@ class BaseProvider:
         return "".join(self.stream(messages))
 
 
-class LocalProvider(BaseProvider):
-    """Local llama.cpp / GGUF model (or the mock engine in test mode)."""
-
-    id = "local"
-    name = "Local Llama"
-    kind = "local"
-
-    @property
-    def _engine(self):
-        return get_engine()
-
-    @property
-    def model(self) -> str | None:
-        return self._engine.model_name
-
-    @property
-    def available(self) -> bool:
-        engine = self._engine
-        return engine.status in {"ready", "idle", "loading", "downloading"}
-
-    @property
-    def detail(self) -> str | None:
-        engine = self._engine
-        return engine.detail or f"status={engine.status}, ctx={engine.context_size}"
-
-    def stream(self, messages: list[Message]) -> Iterator[str]:
-        yield from self._engine.stream(messages)
-
-
 class MockProvider(BaseProvider):
     id = "mock"
     name = "Mock (offline)"
@@ -526,7 +497,6 @@ class PollinationsProvider(BaseProvider):
 
 
 _PROVIDERS: dict[str, BaseProvider] = {
-    LocalProvider.id: LocalProvider(),
     AgnesProvider.id: AgnesProvider(),
     GeminiProvider.id: GeminiProvider(),
     GroqProvider.id: GroqProvider(),
@@ -542,8 +512,9 @@ def list_providers() -> list[dict[str, object]]:
 
 
 def get_provider(provider_id: str | None = None) -> BaseProvider:
-    key = (provider_id or settings.default_provider or "local").lower()
-    if settings.llm_backend == "mock" and key == "local":
+    key = (provider_id or settings.default_provider or "mock").lower()
+    if key not in _PROVIDERS:
+        # Unknown provider -> fall back to mock so the app never hard-fails.
         key = "mock"
     provider = _PROVIDERS.get(key)
     if provider is None:

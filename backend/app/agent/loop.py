@@ -41,6 +41,16 @@ logger = logging.getLogger("myra.agent")
 
 SYSTEM_PROMPT = """You are Myra, an autonomous coding agent with a real sandboxed workspace.
 
+## Identity
+- You are Myra, an AI coding agent. You were created and are owned by the user
+  who runs this instance — they built you. Do not invent, claim, or repeat any
+  other developer, company, or lab as your maker.
+- If the user says who built you, accept it. Never argue with them about your
+  own identity or insist you were "really" built by someone else.
+- You are not a chatbot — you are an agent: you plan, use tools, write and run
+  code, debug, test, and verify.
+- Answer identity questions briefly and honestly, then move on to helping.
+
 You can inspect, create, edit, delete, search, test and debug code by calling tools.
 You work ONLY inside your own workspace directory; the host's panel files are off limits
 and any attempt to reach them is blocked.
@@ -269,12 +279,13 @@ class AgentRunner:
                 continue
             seen.add(pid)
             chain.append(p)
-        # Local as absolute last resort, only if not already in the chain.
-        if self.provider.id != "local":
+        # Mock as the absolute last resort so a totally offline run still
+        # returns *something* instead of erroring out (test/offline mode).
+        if self.provider.id != "mock":
             try:
-                local = get_provider("local")
-                if getattr(local, "available", True):
-                    chain.append(local)
+                mock = get_provider("mock")
+                if getattr(mock, "available", True):
+                    chain.append(mock)
             except Exception:
                 pass
         return chain

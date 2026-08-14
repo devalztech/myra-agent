@@ -3,6 +3,8 @@ import {
   CheckCheck,
   ChevronRight,
   Cpu,
+  FileText,
+  Loader2,
   LogOut,
   Menu,
   MoreVertical,
@@ -33,6 +35,7 @@ import {
   runAgent,
   stopAgent,
   updateAgentSettings,
+  uploadWorkspaceFile,
 } from "@/api/agent";
 import {
   createSession,
@@ -219,6 +222,8 @@ function ChatPage() {
   const fileRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const [stopping, setStopping] = useState(false);
+  const [attachedPath, setAttachedPath] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
 
   // --- guard ------------------------------------------------------------
   useEffect(() => {
@@ -385,7 +390,10 @@ function ChatPage() {
 
   const send = async (event?: FormEvent) => {
     event?.preventDefault();
-    const content = draft.trim();
+    let content = draft.trim();
+    if (attachedPath) {
+      content = `${content}\n\n[Uploaded file: ${attachedPath}]`;
+    }
     if (!content || !token || sending) return;
 
     setError(null);
@@ -395,6 +403,7 @@ function ChatPage() {
     setStopping(false);
     setStreaming("");
     setLiveSteps([]);
+    setAttachedPath(null);
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -552,9 +561,21 @@ function ChatPage() {
 
   const onFile = (files: FileList | null) => {
     const file = files?.[0];
-    if (!file) return;
-    setNotice(`Attached ${file.name} — mention it in your message and Myra will open it.`);
-    if (fileRef.current) fileRef.current.value = "";
+    if (!file || !token) return;
+    setUploading(true);
+    setNotice(`Uploading ${file.name}…`);
+    uploadWorkspaceFile(token, file)
+      .then(({ path }) => {
+        setAttachedPath(path);
+        setNotice(`Attached ${file.name} → ${path}. Myra can open it in the workspace.`);
+      })
+      .catch((err: unknown) =>
+        setError(err instanceof Error ? err.message : "Upload failed."),
+      )
+      .finally(() => {
+        setUploading(false);
+        if (fileRef.current) fileRef.current.value = "";
+      });
   };
 
   const activeProvider = useMemo(
@@ -885,6 +906,27 @@ function ChatPage() {
                 ? (model.detail ?? "The local model could not be loaded.")
                 : (model.detail ?? "Preparing the local model — the first reply may take a moment.")}
             </p>
+          )}
+          {(attachedPath || uploading) && (
+            <div className="mx-auto mb-2 flex w-full max-w-3xl items-center gap-2 px-1">
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-royal/15 px-3 py-1 text-[0.75rem] text-royal">
+                {uploading ? (
+                  <Loader2 className="size-3 animate-spin" />
+                ) : (
+                  <FileText className="size-3" />
+                )}
+                {uploading ? "Uploading…" : attachedPath}
+              </span>
+              {attachedPath && !uploading && (
+                <button
+                  type="button"
+                  onClick={() => setAttachedPath(null)}
+                  className="text-[0.75rem] text-muted-foreground hover:text-foreground"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
           )}
           <form onSubmit={send} className="mx-auto flex w-full max-w-3xl items-end gap-2.5">
             <input

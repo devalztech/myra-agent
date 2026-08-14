@@ -477,6 +477,234 @@ def read_image(path: str) -> dict[str, Any]:
     return info
 
 
+@tool(
+    "project_inspect",
+    "Analyse a project in the workspace: detect language, framework, package manager, "
+    "entrypoints, scripts and dependencies from its manifest files. Use this when entering "
+    "an unfamiliar repository before touching it.",
+    _obj({"path": _str("Project directory. Defaults to the workspace root.")}, ["path"]),
+    label="Inspecting project",
+)
+def project_inspect(path: str = ".") -> dict[str, Any]:
+    root = safe_path(path, must_exist=True)
+    if not root.is_dir():
+        raise ValueError(f"{relative(root)} is not a directory.")
+    info: dict[str, Any] = {"root": relative(root)}
+
+    # Python
+    pyproject = root / "pyproject.toml"
+    setup = root / "setup.py"
+    req = root / "requirements.txt"
+    if pyproject.exists() or setup.exists():
+        info["language"] = "Python"
+        if pyproject.exists():
+            info["build"] = "pyproject.toml"
+        else:
+            info["build"] = "setup.py"
+    elif req.exists():
+        info["language"] = "Python"
+        info["build"] = "requirements.txt"
+
+    # Node
+    pkg = root / "package.json"
+    if pkg.exists():
+        info["language"] = "JavaScript/TypeScript"
+        try:
+            data = json.loads(pkg.read_text(encoding="utf-8", errors="replace"))
+            info["packageManager"] = data.get("packageManager", "npm")
+            if data.get("scripts"):
+                info["scripts"] = data["scripts"]
+            deps = set(data.get("dependencies", {}))
+            deps.update(data.get("devDependencies", {}))
+            for key in ("next", "react", "vue", "svelte", "vite", "express", "nest"):
+                if key in deps:
+                    info["framework"] = key
+        except Exception:
+            pass
+
+    # Go / Rust
+    if (root / "go.mod").exists():
+        info["language"] = "Go"
+    if (root / "Cargo.toml").exists():
+        info["language"] = "Rust"
+        info["build"] = "Cargo.toml"
+
+    # Entrypoints / key files
+    entry_candidates = [
+        "app.py", "main.py", "manage.py", "wsgi.py", "asgi.py",
+        "index.js", "index.ts", "src/index.tsx", "main.go", "src/main.rs",
+    ]
+    present = [c for c in entry_candidates if (root / c).exists()]
+    if present:
+        info["entrypoints"] = present
+
+    # Git
+    info["git"] = (root / ".git").exists()
+
+    # Dirs
+    dirs = sorted(d for d in os.listdir(root) if (root / d).is_dir() and d not in SKIP_DIRS)
+    if dirs:
+        info["dirs"] = dirs[:30]
+
+    return info
+
+
+@tool(
+    "git",
+    "Run a safe git operation in the workspace (status, diff, log, branch, add, commit, "
+    "checkout, stash, merge, pull, push, clone). Destructive/uncommon ops are guarded.",
+    _obj(
+        {
+            "operation": _str(
+                "One of: status, diff, log, branch, add, commit, checkout, stash, merge, "
+                "pull, push, clone, remote, show"
+            ),
+            "path": _str("Repo directory (defaults to workspace root)."),
+            "args": _str("Extra arguments (e.g. files to add, commit message)."),
+        },
+        ["operation"],
+    ),
+    label="Running git",
+)
+def git(operation: str, path: str = ".", args: str = "") -> dict[str, Any]:
+    repo = safe_path(path, must_exist=True)
+    if not (repo / ".git").exists() and operation != "clone":
+        return {"error": f"{relative(repo)} is not a git repository."}
+    allowed = {
+        "status", "diff", "log", "branch", "add", "commit", "checkout",
+        "stash", "merge", "pull", "push", "remote", "show",
+    }
+    op = (operation or "").strip().lower()
+    if op not in allowed:
+        raise ValueError(f"Unsafe or unsupported git operation: {operation}")
+    # Safety: refuse obviously dangerous argument combinations
+    blocked_args = ["--force", "--hard", "-f"]
+    if op in ("reset", "checkout") and any(b in (args or "") for b in blocked_args):
+        raise ValueError("Refusing destructive git operation. Use safer arguments.")
+    cmd = ["git", op]
+    if args:
+        cmd.append(args)
+    result = _run(" ".join(cmd), repo, timeout=60)
+    return result
+
+
+@tool(
+    "get_workflow",
+    "Load a named workflow procedure (debug, test, web, api, database, deploy, recover, git) "
+    "that tells you the correct end-to-end sequence for that task.",
+    _obj({"name": _str("Workflow name: debug, test, web, api, database, deploy, recover, or git.")}, ["name"]),
+    label="Loading workflow",
+)
+def get_workflow(name: str) -> str:
+    from ..workflows import WORKFLOW_NAMES, workflow_text
+
+    text = workflow_text(name)
+    if text:
+        return text
+    return f"Unknown workflow '{name}'. Available: {', '.join(WORKFLOW_NAMES)}"
+
+
+@tool(
+    "db_query",
+    "Run a read-only SQLite SELECT/PRAGMA query against a .db file in the workspace.",
+    _obj({"path": _str("Path to the .sqlite/.db file."), "sql": _str("SELECT or PRAGMA SQL query.")}, ["path", "sql"]),
+    label="Querying database",
+)
+def db_query(path: str, sql: str) -> str:
+    from ..services.database import DatabaseError, sqlite_connect, sqlite_query
+
+    db = safe_path(path, must_exist=True)
+    try:
+        conn = sqlite_connect(db)
+        try:
+            return sqlite_query(conn, sql)
+        finally:
+            conn.close()
+    except (DatabaseError, Exception) as exc:  # noqa: BLE001
+        return f"DB error: {exc}"
+
+
+@tool(
+    "db_schema",
+    "Show the schema (tables + SQL) of a SQLite .db file in the workspace.",
+    _obj({"path": _str("Path to the .sqlite/.db file.")}, ["path"]),
+    label="Reading database schema",
+)
+def db_schema(path: str) -> str:
+    from ..services.database import DatabaseError, sqlite_connect, sqlite_schema
+
+    db = safe_path(path, must_exist=True)
+    try:
+        conn = sqlite_connect(db)
+        try:
+            return sqlite_schema(conn)
+        finally:
+            conn.close()
+    except (DatabaseError, Exception) as exc:  # noqa: BLE001
+        return f"DB error: {exc}"
+
+
+@tool(
+    "preview",
+    "Start and manage a local dev/preview server for a project in the workspace "
+    "(detect command, start, find port, health check, stop).",
+    _obj(
+        {
+            "action": _str("start | stop | health | port"),
+            "path": _str("Project directory. Defaults to workspace root."),
+        },
+        ["action"],
+    ),
+    label="Managing preview server",
+)
+def preview(action: str, path: str = ".") -> dict[str, Any]:
+    from ..services.preview import health, start, stop
+
+    root = safe_path(path, must_exist=True)
+    action = (action or "").strip().lower()
+    if action == "start":
+        return start(root)
+    if action == "stop":
+        return stop(root)
+    if action in ("health", "status"):
+        return health(root)
+    return {"error": f"Unknown action: {action}. Use start, stop, or health."}
+
+
+@tool(
+    "browser",
+    "Automate a webpage with a real browser (Playwright). Actions: open, text, click, "
+    "fill, type, screenshot. Needs Playwright + chromium installed.",
+    _obj(
+        {
+            "action": _str("open | text | click | fill | type | screenshot"),
+            "url": _str("Absolute http(s) URL to open."),
+            "selector": _str("CSS selector for click/fill/type."),
+            "text": _str("Text to fill/type."),
+        },
+        ["action"],
+    ),
+    label="Automating browser",
+)
+def browser(action: str, url: str = "", selector: str = "", text: str = "") -> dict[str, Any]:
+    _require_network()
+    if not settings.enable_browser_tools:
+        raise CommandBlocked("Browser tools are disabled by configuration.")
+    from ..services.browser import open_page
+
+    if action in ("click", "fill", "type") and not selector:
+        return {"error": f"action '{action}' requires a selector."}
+    if action in ("fill", "type") and not text:
+        return {"error": f"action '{action}' requires text."}
+    return open_page(
+        url,
+        action=action,
+        selector=selector or None,
+        text=text or None,
+        screenshot=(action == "screenshot"),
+    )
+
+
 # --------------------------------------------------------------------------
 # network / browser
 # --------------------------------------------------------------------------
