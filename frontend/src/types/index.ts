@@ -97,11 +97,24 @@ export type AgentEvent = {
 
 export type ActivityStatus = "pending" | "running" | "done" | "error" | "blocked";
 
+/**
+ * What kind of action a step represents, independent of whether it
+ * succeeded — this is what picks the icon. `status` still governs color
+ * and the running/pulse state.
+ */
+export type ActivityKind = "think" | "read" | "edit" | "run" | "network" | "memory" | "done";
+
 export type ActivityStep = {
   id: string;
   label: string;
-  detail?: string;
+  kind: ActivityKind;
   status: ActivityStatus;
+  /** Short one-line hint shown truncated in the collapsed row (e.g. a path). */
+  detail?: string;
+  /** Full text shown only when the step is expanded: thought, tool output, or error. */
+  body?: string;
+  /** Tool arguments, shown pretty-printed when the step is expanded. */
+  args?: Record<string, unknown>;
 };
 
 /** An assistant turn plus the agent steps that produced it. */

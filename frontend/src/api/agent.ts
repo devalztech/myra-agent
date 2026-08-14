@@ -27,6 +27,22 @@ export function fetchSessionEvents(
 }
 
 /**
+ * Explicit stop, distinct from just aborting the fetch. A dropped
+ * connection alone no longer halts a run server-side (it finishes
+ * unattended so a flaky connection can't strand it mid-task) — this is
+ * what actually tells the backend "the user asked to stop", so it must be
+ * called (and awaited, or at least fired) before the AbortController is
+ * used to close the stream. Best-effort: if it fails to send (e.g. already
+ * offline), the run simply keeps going and finishes on its own, which is
+ * the safe default anyway.
+ */
+export function stopAgent(token: string, sessionId: string): Promise<void> {
+  return apiRequest<void>(`/sessions/${sessionId}/stop`, { method: "POST", token }).catch(
+    () => undefined,
+  );
+}
+
+/**
  * Downloads a file from the agent's workspace, authenticated with the
  * user's token. A plain <a href> to /workspace/download won't work — that
  * endpoint requires a Bearer token header, which a normal browser

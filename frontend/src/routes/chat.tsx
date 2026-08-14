@@ -10,6 +10,7 @@ import {
   Plus,
   SendHorizontal,
   ShieldCheck,
+  Square,
   SquarePen,
   Trash2,
   Wand2,
@@ -30,6 +31,7 @@ import {
   fetchProviders,
   fetchSessionEvents,
   runAgent,
+  stopAgent,
   updateAgentSettings,
 } from "@/api/agent";
 import {
@@ -81,6 +83,33 @@ function clock(iso: string): string {
   return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
+/** Which lucide icon a step gets is driven by this, not by success/failure. */
+const TOOL_KIND: Record<string, ActivityStep["kind"]> = {
+  list_files: "read",
+  read_file: "read",
+  search_code: "read",
+  read_image: "read",
+  recall: "memory",
+  get_skill: "read",
+  write_file: "edit",
+  edit_file: "edit",
+  delete_path: "edit",
+  move_path: "edit",
+  zip_paths: "edit",
+  unzip_archive: "edit",
+  remember: "memory",
+  run_command: "run",
+  run_tests: "run",
+  http_fetch: "network",
+  web_search: "network",
+  browse_page: "network",
+  screenshot_page: "network",
+};
+
+function kindForTool(tool: string): ActivityStep["kind"] {
+  return TOOL_KIND[tool] ?? "run";
+}
+
 /** Turns raw agent SSE frames into an ordered activity timeline. */
 function reduceSteps(previous: ActivityStep[], event: AgentEvent): ActivityStep[] {
   const steps = [...previous];
@@ -89,10 +118,20 @@ function reduceSteps(previous: ActivityStep[], event: AgentEvent): ActivityStep[
   if (event.type === "thought") {
     const text = String(event["text"] ?? "").trim();
     if (!text) return steps;
-    return [...steps, { id: `t${steps.length}`, label: text, status: "done" }];
+    return [
+      ...steps,
+      {
+        id: `t${steps.length}`,
+        label: text.length > 80 ? `${text.slice(0, 80)}…` : text,
+        kind: "think",
+        status: "done",
+        body: text.length > 80 ? text : undefined,
+      },
+    ];
   }
 
   if (event.type === "tool_start") {
+    const tool = String(event["tool"] ?? "");
     const args = (event["arguments"] ?? {}) as Record<string, unknown>;
     const hint =
       (args["path"] as string) ||
@@ -105,7 +144,9 @@ function reduceSteps(previous: ActivityStep[], event: AgentEvent): ActivityStep[
       {
         id: `s${steps.length}`,
         label,
+        kind: kindForTool(tool),
         ...(hint ? { detail: String(hint).slice(0, 120) } : {}),
+        ...(Object.keys(args).length > 0 ? { args } : {}),
         status: "running",
       },
     ];
@@ -120,12 +161,26 @@ function reduceSteps(previous: ActivityStep[], event: AgentEvent): ActivityStep[
             : (event["status"] as string) === "blocked"
               ? "blocked"
               : "error");
+    const body = String(event["result"] ?? event["message"] ?? "").trim() || undefined;
     for (let i = steps.length - 1; i >= 0; i -= 1) {
       const step = steps[i];
       if (step && step.status === "running") {
-        steps[i] = { ...step, status: status as ActivityStep["status"] };
+        steps[i] = { ...step, status: status as ActivityStep["status"], ...(body ? { body } : {}) };
         return steps;
       }
+    }
+    // tool_error for an unknown tool never got a tool_start row — add one.
+    if (event.type === "tool_error") {
+      return [
+        ...steps,
+        {
+          id: `s${steps.length}`,
+          label,
+          kind: "run",
+          status: "error",
+          ...(body ? { body } : {}),
+        },
+      ];
     }
     return steps;
   }
@@ -133,9 +188,8 @@ function reduceSteps(previous: ActivityStep[], event: AgentEvent): ActivityStep[
   if (event.type === "final") {
     // A plain answer with no thoughts/tools needs no timeline at all.
     if (steps.length === 0) return steps;
-    return [...steps, { id: `done${steps.length}`, label: "Done", status: "done" }];
+    return [...steps, { id: `done${steps.length}`, label: "Done", kind: "done", status: "done" }];
   }
-
 
   return steps;
 }
@@ -163,6 +217,8 @@ function ChatPage() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const [stopping, setStopping] = useState(false);
 
   // --- guard ------------------------------------------------------------
   useEffect(() => {
@@ -336,8 +392,14 @@ function ChatPage() {
     setNotice(null);
     setDraft("");
     setSending(true);
+    setStopping(false);
     setStreaming("");
     setLiveSteps([]);
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+    let capturedSteps: ActivityStep[] = [];
+    let capturedText = "";
 
     let sessionId = activeId;
     try {
@@ -367,14 +429,19 @@ function ChatPage() {
           token,
           sessionId,
           content,
-          { ...(settings?.provider ? { provider: settings.provider } : {}), approved: true },
+          {
+            ...(settings?.provider ? { provider: settings.provider } : {}),
+            approved: true,
+            signal: controller.signal,
+          },
           (frame) => {
             if (frame.type === "error") {
               setError(String(frame["message"] ?? "Agent run failed."));
               return;
             }
             if (frame.type === "final") {
-              setStreaming(String(frame["text"] ?? ""));
+              capturedText = String(frame["text"] ?? "");
+              setStreaming(capturedText);
             }
             if (frame.type === "done") {
               const message = frame["message"] as ChatMessage | undefined;
@@ -387,6 +454,7 @@ function ChatPage() {
               return;
             }
             steps = reduceSteps(steps, frame);
+            capturedSteps = steps;
             setLiveSteps(steps);
           },
         );
@@ -395,9 +463,10 @@ function ChatPage() {
           onSession: ({ id, title }) =>
             setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, title } : s))),
           onStatus: ({ message }) =>
-            setLiveSteps([{ id: "warmup", label: message, status: "running" }]),
+            setLiveSteps([{ id: "warmup", label: message, kind: "think", status: "running" }]),
           onToken: (piece) => {
             setLiveSteps([]);
+            capturedText += piece;
             setStreaming((prev) => prev + piece);
           },
           onDone: (assistant) => {
@@ -413,20 +482,64 @@ function ChatPage() {
             ]);
           },
           onError: (message) => setError(message),
-        });
+        }, controller.signal);
       }
 
       const rows = await fetchSessions(token);
       setSessions(rows);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Message failed to send.");
-      setDraft(content);
+      if (controller.signal.aborted) {
+        setNotice("Stopped.");
+        setDraft(content);
+        // Keep whatever Myra had done so far visible as a finished (not
+        // "running") record instead of wiping it — stopping shouldn't hide
+        // the steps that already happened.
+        if (capturedSteps.length > 0) {
+          const frozen = capturedSteps.map((step) =>
+            step.status === "running"
+              ? { ...step, status: "blocked" as const, detail: step.detail ?? "Stopped" }
+              : step,
+          );
+          const stoppedId = `stopped-${Date.now()}`;
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: stoppedId,
+              role: "assistant",
+              content: capturedText.trim() || "_Stopped before finishing._",
+              createdAt: new Date().toISOString(),
+            },
+          ]);
+          setStepsByMessage((prev) => ({ ...prev, [stoppedId]: frozen }));
+        }
+      } else {
+        setError(err instanceof Error ? err.message : "Message failed to send.");
+        setDraft(content);
+      }
     } finally {
       setStreaming("");
       setLiveSteps([]);
       setSending(false);
+      setStopping(false);
+      abortRef.current = null;
     }
   };
+
+  const stop = useCallback(() => {
+    if (!abortRef.current) return;
+    setStopping(true);
+    // Tell the backend this is a deliberate stop *before* aborting the
+    // fetch — once the fetch is aborted the server only sees a dropped
+    // connection, which on its own no longer halts the run (so a flaky
+    // connection can't strand a task mid-way). This call is what actually
+    // makes the Stop button stop it. Fire-and-forget: stopAgent() swallows
+    // its own errors, and we abort immediately after regardless so the UI
+    // doesn't wait on it.
+    if (token && activeId) {
+      void stopAgent(token, activeId);
+    }
+    abortRef.current.abort();
+  }, [token, activeId]);
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "Enter" && !event.shiftKey) {
@@ -726,7 +839,7 @@ function ChatPage() {
                     <MyraAvatar />
                     <div className="min-w-0 flex-1 space-y-2.5">
                       {liveSteps.length > 0 && (
-                        <ActivityTimeline steps={liveSteps} running={sending} />
+                        <ActivityTimeline steps={liveSteps} running={sending && !stopping} />
                       )}
                       {streaming ? (
                         <div className="rounded-2xl bg-bubble-agent px-4 py-3">
@@ -739,7 +852,9 @@ function ChatPage() {
                       ) : (
                         liveSteps.length === 0 &&
                         sending && (
-                          <p className="px-1 py-1.5 text-[0.9375rem] text-shimmer">Thinking…</p>
+                          <p className="px-1 py-1.5 text-[0.9375rem] text-shimmer">
+                            {stopping ? "Stopping…" : "Thinking…"}
+                          </p>
                         )
                       )}
                     </div>
@@ -806,14 +921,26 @@ function ChatPage() {
                 placeholder="Message Myra…"
                 className="scroll-slim max-h-44 min-w-0 flex-1 resize-none bg-transparent py-1.5 text-[0.9375rem] leading-[1.5] outline-none placeholder:text-muted-foreground"
               />
-              <button
-                type="submit"
-                aria-label="Send message"
-                disabled={!draft.trim() || sending}
-                className="focus-royal flex size-8 shrink-0 items-center justify-center rounded-xl text-royal transition-opacity hover:opacity-80 disabled:opacity-35"
-              >
-                <SendHorizontal className="size-[1.35rem]" />
-              </button>
+              {sending ? (
+                <button
+                  type="button"
+                  onClick={stop}
+                  disabled={stopping}
+                  aria-label="Stop Myra"
+                  className="focus-royal flex size-8 shrink-0 items-center justify-center rounded-xl bg-royal text-primary-foreground transition-opacity hover:opacity-80 disabled:opacity-50"
+                >
+                  <Square className="size-3.5" fill="currentColor" />
+                </button>
+              ) : (
+                <button
+                  type="submit"
+                  aria-label="Send message"
+                  disabled={!draft.trim()}
+                  className="focus-royal flex size-8 shrink-0 items-center justify-center rounded-xl text-royal transition-opacity hover:opacity-80 disabled:opacity-35"
+                >
+                  <SendHorizontal className="size-[1.35rem]" />
+                </button>
+              )}
             </div>
           </form>
         </div>
