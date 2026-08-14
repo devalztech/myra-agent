@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Check, Copy, Download, Loader2 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -136,10 +136,61 @@ function DownloadLink({ label, path, token }: { label: string; path: string; tok
   );
 }
 
-/** Inline: `code`, **bold**, *italic*, [text](href), [file](download:path). */
+/** Renders a workspace image via the authenticated download endpoint. */
+function WorkspaceImage({ path, token, alt }: { path: string; token?: string | null; alt?: string }) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    let objectUrl: string | null = null;
+    if (!token) return;
+    void (async () => {
+      try {
+        const res = await fetch(
+          `${import.meta.env.VITE_API_URL ?? "http://localhost:8000"}/workspace/download?path=${encodeURIComponent(path)}`,
+          { headers: { Authorization: `Bearer ${token}` } },
+        );
+        if (!res.ok) throw new Error("not ok");
+        const blob = await res.blob();
+        objectUrl = URL.createObjectURL(blob);
+        if (active) setUrl(objectUrl);
+      } catch {
+        if (active) setFailed(true);
+      }
+    })();
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [path, token]);
+
+  if (failed) {
+    return (
+      <span className="inline-block rounded-lg border border-destructive/30 px-2 py-1 font-mono text-[0.8em] text-muted-foreground">
+        Image unavailable
+      </span>
+    );
+  }
+  if (!url) {
+    return <span className="inline-block h-8 w-24 animate-pulse rounded-lg bg-surface-raised" />;
+  }
+  return (
+    <a href={url} target="_blank" rel="noreferrer" title={alt || path}>
+      <img
+        src={url}
+        alt={alt || path}
+        className="my-2 max-h-80 max-w-full rounded-xl border border-hairline object-contain"
+      />
+    </a>
+  );
+}
+
+/** Inline: `code`, **bold**, *italic*, [text](href), [file](download:path), ![img](download:path). */
 function renderInline(text: string, keyPrefix: string, token?: string | null): ReactNode[] {
   const nodes: ReactNode[] = [];
-  const pattern = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*]+\*)|(\[[^\]]+\]\([^)\s]+\))/g;
+  const pattern =
+    /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*]+\*)|(!\[[^\]]*\]\([^)\s]+\))|(\[[^\]]+\]\([^)\s]+\))/g;
   let last = 0;
   let match: RegExpExecArray | null;
   let key = 0;
@@ -163,6 +214,28 @@ function renderInline(text: string, keyPrefix: string, token?: string | null): R
           {token_.slice(2, -2)}
         </strong>,
       );
+    } else if (token_.startsWith("![")) {
+      const link = /^!\[([^\]]*)\]\(([^)\s]+)\)$/.exec(token_);
+      const href = link?.[2] ?? "#";
+      if (href.startsWith("download:")) {
+        nodes.push(
+          <WorkspaceImage
+            key={id}
+            path={href.slice("download:".length)}
+            token={token}
+            alt={link?.[1] || undefined}
+          />,
+        );
+      } else {
+        nodes.push(
+          <img
+            key={id}
+            src={href}
+            alt={link?.[1] || ""}
+            className="my-2 max-h-80 max-w-full rounded-xl border border-hairline object-contain"
+          />
+        );
+      }
     } else if (token_.startsWith("[")) {
       const link = /^\[([^\]]+)\]\(([^)\s]+)\)$/.exec(token_);
       const href = link?.[2] ?? "#";

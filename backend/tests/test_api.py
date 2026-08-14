@@ -194,5 +194,5 @@ def test_model_status(client):
     assert res.status_code == 200
     body = res.json()
     assert body["backend"] == "mock"
-    assert body["ramGb"] > 0
+    assert body["model"] == "myra-mock"
     assert body["tier"]

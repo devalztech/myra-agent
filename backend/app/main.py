@@ -297,7 +297,7 @@ def health() -> dict:
     return {
         "status": "ok",
         "database": "sqlite",
-        "llm_backend": settings.llm_backend,
+        "provider": settings.default_provider,
         "tunnel_url": tunnel_url,
     }
 

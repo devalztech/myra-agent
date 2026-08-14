@@ -524,6 +524,9 @@ function ChatPage() {
       } else {
         setError(err instanceof Error ? err.message : "Message failed to send.");
         setDraft(content);
+        // Connection dropped: the backend keeps the agent working, so pull
+        // back whatever it finished while we were offline.
+        void resyncSession();
       }
     } finally {
       setStreaming("");
@@ -582,6 +585,27 @@ function ChatPage() {
     () => providers.find((p) => p.id === settings?.provider) ?? null,
     [providers, settings],
   );
+
+  // Re-fetch the active session + its recorded steps. Used to resync the UI
+  // after the connection drops: the backend keeps the agent working while
+  // we're offline, so on reconnect we pull back whatever it finished.
+  const resyncSession = useCallback(async () => {
+    if (!token || !activeId) return;
+    try {
+      const session = await fetchSession(token, activeId);
+      setMessages(session.messages);
+      const { events } = await fetchSessionEvents(token, activeId);
+      const grouped: Record<string, ActivityStep[]> = {};
+      for (const event of events) {
+        const id = event.messageId;
+        if (!id) continue;
+        grouped[id] = reduceSteps(grouped[id] ?? [], event);
+      }
+      setStepsByMessage(grouped);
+    } catch {
+      /* ignore — keep whatever we have */
+    }
+  }, [token, activeId]);
 
   const empty = messages.length === 0 && !streaming && liveSteps.length === 0;
 
@@ -803,7 +827,7 @@ function ChatPage() {
         </header>
 
         {/* transcript */}
-        <div ref={scrollRef} className="scroll-slim flex-1 overflow-y-auto">
+        <div ref={scrollRef} className="scroll-slim flex-1 overflow-y-auto overflow-x-hidden">
           <div className="mx-auto w-full max-w-3xl px-4 pt-6 pb-4 sm:px-6">
             {empty ? (
               <div className="flex flex-col items-center pt-[16vh] text-center">
@@ -819,9 +843,9 @@ function ChatPage() {
               <ul className="space-y-5">
                 {messages.map((message) =>
                   message.role === "user" ? (
-                    <li key={message.id} className="flex justify-end">
-                      <div className="max-w-[85%] rounded-2xl bg-bubble-user px-4 py-3 sm:max-w-[75%]">
-                        <p className="text-[0.9375rem] leading-[1.6] whitespace-pre-wrap text-bubble-user-foreground">
+                    <li key={message.id} className="flex min-w-0 justify-end">
+                      <div className="max-w-[85%] min-w-0 rounded-2xl bg-bubble-user px-4 py-3 sm:max-w-[75%]">
+                        <p className="text-[0.9375rem] leading-[1.6] break-words whitespace-pre-wrap text-bubble-user-foreground">
                           {message.content}
                         </p>
                         <p className="mt-1 flex items-center justify-end gap-1.5 text-[0.7rem] text-bubble-user-foreground/60">
@@ -840,7 +864,7 @@ function ChatPage() {
                             running={false}
                           />
                         ) : null}
-                        <div className="max-w-full rounded-2xl bg-bubble-agent px-4 py-3">
+                        <div className="max-w-full min-w-0 rounded-2xl bg-bubble-agent px-4 py-3">
                           <Markdown
                             content={message.content}
                             className="text-bubble-agent-foreground"

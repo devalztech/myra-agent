@@ -103,52 +103,80 @@ export async function runAgent(
   options: { provider?: string; approved?: boolean; signal?: AbortSignal },
   onEvent: (event: AgentEvent) => void,
 ): Promise<void> {
-  let response: Response;
-  try {
-    response = await fetch(`${API_URL}/sessions/${sessionId}/agent`, {
-      method: "POST",
-      signal: options.signal ?? null,
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify({
-        content,
-        provider: options.provider ?? null,
-        approved: options.approved ?? false,
-      }),
-    });
-  } catch {
-    throw new ApiError("Cannot reach the Myra backend. Please try again.", 0);
-  }
+  const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const MAX_RETRIES = 2;
 
-  if (!response.ok || !response.body) {
-    throw new ApiError(response.statusText || "Agent run failed.", response.status);
-  }
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
+    if (options.signal?.aborted) throw new Error("aborted");
 
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-
-    let split = buffer.indexOf("\n\n");
-    while (split !== -1) {
-      const frame = buffer.slice(0, split);
-      buffer = buffer.slice(split + 2);
-      split = buffer.indexOf("\n\n");
-
-      const data = frame
-        .split("\n")
-        .filter((line) => line.startsWith("data:"))
-        .map((line) => line.slice(5).trim())
-        .join("\n");
-      if (!data) continue;
-      try {
-        onEvent(JSON.parse(data) as AgentEvent);
-      } catch {
-        /* ignore malformed frame */
+    let response: Response;
+    try {
+      response = await fetch(`${API_URL}/sessions/${sessionId}/agent`, {
+        method: "POST",
+        signal: options.signal ?? null,
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          content,
+          provider: options.provider ?? null,
+          approved: options.approved ?? false,
+        }),
+      });
+    } catch {
+      if (options.signal?.aborted) throw new Error("aborted");
+      if (attempt < MAX_RETRIES) {
+        await delay(1200 * (attempt + 1));
+        continue;
       }
+      throw new ApiError("Connection to Myra lost. Please try again.", 0);
     }
+
+    if (!response.ok || !response.body) {
+      throw new ApiError(response.statusText || "Agent run failed.", response.status);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let sawDone = false;
+
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let split = buffer.indexOf("\n\n");
+        while (split !== -1) {
+          const frame = buffer.slice(0, split);
+          buffer = buffer.slice(split + 2);
+          split = buffer.indexOf("\n\n");
+
+          const data = frame
+            .split("\n")
+            .filter((line) => line.startsWith("data:"))
+            .map((line) => line.slice(5).trim())
+            .join("\n");
+          if (!data) continue;
+          let event: AgentEvent;
+          try {
+            event = JSON.parse(data) as AgentEvent;
+          } catch {
+            continue;
+          }
+          if (event.type === "done") sawDone = true;
+          onEvent(event);
+        }
+      }
+    } catch {
+      // Stream broke mid-flight (network drop). Retry unless the user
+      // stopped or we already saw a clean terminal event.
+      if (options.signal?.aborted || sawDone) throw new Error("aborted");
+      if (attempt < MAX_RETRIES) {
+        await delay(1200 * (attempt + 1));
+        continue;
+      }
+      throw new ApiError("Connection to Myra was lost mid-response. Please try again.", 0);
+    }
+    return;
   }
 }

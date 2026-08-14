@@ -23,7 +23,7 @@ from ..agent.tools import TOOLS
 from ..config import settings
 from ..database import SessionLocal, get_db
 from ..deps import get_current_user, get_owned_session
-from ..llm.prompts import title_from_message
+from ..llmutil import title_from_message
 from ..models import AgentEventRow, ChatMessage, Memory, ScheduledTask, User, UserSettings, utcnow
 from ..providers import get_provider, list_providers
 from ..scheduler import run_task_now

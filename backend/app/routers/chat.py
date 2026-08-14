@@ -13,9 +13,9 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import SessionLocal, get_db
 from ..deps import get_current_user, get_owned_session
-from ..llm.engine import LLMUnavailable, build_messages, get_engine
-from ..llm.prompts import title_from_message
+from ..llmutil import LLMUnavailable, title_from_message
 from ..models import ChatMessage, ChatSession, User, utcnow
+from ..providers import get_provider
 from ..schemas import ChatPayload, ChatResponse, MessageOut, ModelStatus
 from .sessions import to_summary
 
@@ -45,17 +45,16 @@ def _record_user_message(
 
 @router.get("/model", response_model=ModelStatus)
 def model_status() -> ModelStatus:
-    engine = get_engine()
+    provider = get_provider()
     return ModelStatus(
-        backend=engine.backend,
-        model=engine.model_name,
-        loaded=engine.loaded,
-        contextSize=engine.context_size,
-        ramGb=engine.ram_gb,
-        tier=engine.tier.name,
-        status=engine.status,
-        detail=engine.detail,
-        threads=settings.threads,
+        backend=provider.kind,
+        model=provider.model,
+        loaded=provider.available,
+        contextSize=0,
+        ramGb=0,
+        tier=provider.kind,
+        status="ready" if provider.available else "error",
+        detail=provider.detail,
     )
 
 
@@ -69,11 +68,11 @@ def chat(
     session = get_owned_session(session_id, db, user)
     user_message, history = _record_user_message(db, session, payload.content)
 
-    engine = get_engine()
     try:
-        reply = engine.complete(build_messages(history, payload.content)).strip()
+        provider = get_provider()
+        reply = provider.complete([*history, {"role": "user", "content": payload.content}]).strip()
     except LLMUnavailable as exc:
-        logger.error("Local model unavailable: %s", exc)
+        logger.error("Provider unavailable: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
@@ -81,7 +80,7 @@ def chat(
         logger.exception("Inference failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Local model failed to generate a response.",
+            detail="The model failed to generate a response.",
         ) from exc
 
     assistant = ChatMessage(
@@ -136,21 +135,13 @@ def chat_stream(
         yield _sse("session", {"id": session_id, "title": session_title})
         yield _sse("user_message", user_message_payload)
 
-        engine = get_engine()
-        if not engine.loaded:
-            # First message after a cold boot can sit for a while behind a
-            # model download/load. Tell the UI instead of looking frozen.
-            yield _sse(
-                "status",
-                {
-                    "state": engine.status,
-                    "message": engine.detail or "Preparing the local model…",
-                },
-            )
+        provider = get_provider()
         pieces: list[str] = []
         stopped = False
         try:
-            for index, token in enumerate(engine.stream(build_messages(history, payload.content))):
+            for index, token in enumerate(
+                provider.stream([*history, {"role": "user", "content": payload.content}])
+            ):
                 pieces.append(token)
                 yield _sse("token", {"token": token})
                 # Check every few tokens rather than every single one — the
@@ -164,7 +155,7 @@ def chat_stream(
             return
         except Exception:  # pragma: no cover - defensive
             logger.exception("Streaming inference failed")
-            yield _sse("error", {"message": "Local model failed to generate a response."})
+            yield _sse("error", {"message": "The model failed to generate a response."})
             return
 
         reply = "".join(pieces).strip() or ("(stopped)" if stopped else "(empty response)")

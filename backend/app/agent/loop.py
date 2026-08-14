@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..config import settings
-from ..llm.engine import LLMUnavailable
+from ..llmutil import LLMUnavailable
 from ..providers import BaseProvider, get_provider, list_providers
 from ..workspace import UnsafePath, workspace_root
 from .context import build_context, history_window
@@ -234,27 +234,11 @@ class AgentRunner:
     def _context_budget_chars(self) -> int:
         """How many chars of workspace context to inline in the prompt.
 
-        Every char here is something the local model has to re-ingest on
-        CPU before it can start generating — the single biggest fixed cost
-        of a run on small/no-GPU panels (see llm/engine.py's KV cache for
-        what's saved on repeat steps *within* a run; this controls what
-        gets ingested at all on the first step). A flat 8000-char budget
-        made sense as a rough default but eats a large fraction of a
-        4k-context nano/coder-nano model's whole window before the
-        conversation even starts. Scale it off the model's actual
-        context_size when the local engine exposes one; remote providers
-        (larger windows, no local CPU cost) keep the original default.
+        Myra is remote-only now (no local engine). A flat, conservative
+        budget keeps the prompt small so the model isn't drowning in
+        workspace context before it starts generating.
         """
-        engine = getattr(self.provider, "_engine", None)
-        context_size = getattr(engine, "context_size", None)
-        if not isinstance(context_size, int) or context_size <= 0:
-            return 8000
-        # Reserve the rest of the window for tools/skills/history/reply;
-        # workspace context gets roughly a third of it, in chars (~4
-        # chars/token), floored so tiny-context tiers still get *something*
-        # useful and capped so a huge-context tier doesn't just re-adopt
-        # the old flat cost for no reason.
-        return max(1500, min(8000, int(context_size * 4 * 0.33)))
+        return 8000
 
     def _failover_chain(self) -> list[BaseProvider]:
         """Ordered provider list for this run, primary first.

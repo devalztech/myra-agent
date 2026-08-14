@@ -19,7 +19,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 
 from .config import settings
-from .llm.engine import LLMUnavailable, get_engine
+from .llmutil import LLMUnavailable
 
 logger = logging.getLogger("myra.providers")
 

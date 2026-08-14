@@ -111,56 +111,10 @@ class Settings:
         self.sqlite_path.parent.mkdir(parents=True, exist_ok=True)
         self.database_url = f"sqlite:///{self.sqlite_path}"
 
-        # --- llm ---------------------------------------------------------
-        # "llama_cpp" (default, local GGUF) or "mock" (deterministic, for tests)
-        self.llm_backend = _env("MYRA_LLM_BACKEND", "llama_cpp").lower()
-        self.models_dir = Path(_env("MYRA_MODELS_DIR") or (BACKEND_DIR / "models"))
-        self.model_path = _env("MYRA_MODEL_PATH")  # explicit .gguf file wins
-        self.model_repo = _env("MYRA_MODEL_REPO")  # HF repo id override
-        self.model_file = _env("MYRA_MODEL_FILE")  # HF filename override
-        self.context_size = _env_int("MYRA_CONTEXT_SIZE", 0)  # 0 -> auto from tier
+        # --- generation --------------------------------------------------
         self.max_tokens = _env_int("MYRA_MAX_TOKENS", 512)
         self.temperature = _env_float("MYRA_TEMPERATURE", 0.4)
         self.top_p = _env_float("MYRA_TOP_P", 0.95)
-        self.gpu_layers = _env_int("MYRA_GPU_LAYERS", 0)
-        # Thread count. llama.cpp scales NEGATIVELY once you ask for more
-        # threads than the container is actually allowed to run: on a panel
-        # limited to 200% CPU (2 cores) sitting on a 64-core host,
-        # os.cpu_count() / sched_getaffinity() both report 64, so llama.cpp
-        # spawns 64 workers that the cgroup then throttles — the same 3B
-        # model measured 5.4 tok/s at the right thread count and 0.25 tok/s
-        # oversubscribed. _auto_threads() now reads the cgroup CPU quota so
-        # the default matches the real allowance.
-        self.threads = _env_int("MYRA_THREADS", 0) or self._auto_threads()
-        # Prompt-ingest batch. Bigger = faster prefill, more RAM. On a
-        # 1-2 core panel a huge batch just costs RAM, so scale it with the
-        # thread count instead of always using 512.
-        self.batch_size = _env_int("MYRA_BATCH_SIZE", 0) or (256 if self.threads <= 2 else 512)
-        # Explicit tier override ("nano" | "compact" | "standard" | ...).
-        self.model_tier = _env("MYRA_MODEL_TIER").lower()
-        # Never auto-select a model bigger than this many GB of weights.
-        # Huge models fit in RAM but are unusably slow on CPU-only panels.
-        self.max_auto_model_gb = _env_float("MYRA_MAX_AUTO_MODEL_GB", 2.5)
-        # Reserve RAM (GB) for the OS/API when picking a model tier.
-        self.ram_reserve_gb = _env_float("MYRA_RAM_RESERVE_GB", 1.0)
-        self.ram_override_gb = _env_float("MYRA_RAM_GB", 0.0)
-        # Preload the model at boot (in a background thread) so the first
-        # chat message isn't stuck behind a cold model load.
-        self.preload_model = _env_bool("MYRA_PRELOAD_MODEL", True)
-        # Keep the model resident between requests (mmap on, mlock off by
-        # default so a small panel can still page weights out under pressure).
-        self.use_mmap = _env_bool("MYRA_USE_MMAP", True)
-        self.use_mlock = _env_bool("MYRA_USE_MLOCK", False)
-        # Explicit prompt-prefix KV cache (see LlamaCache in llm/engine.py).
-        # Within one agent run the transcript only grows by append — same
-        # system prompt + workspace context, tool steps appended after —
-        # so this is what actually lets step 2/3/4 of a run skip
-        # re-ingesting everything step 1 already processed. Costs RAM
-        # (bounded by llm_kv_cache_bytes), so it's off by default on a
-        # tight panel; worth turning on anywhere multi-step agent runs are
-        # the common case rather than one-off replies.
-        self.llm_kv_cache = _env_bool("MYRA_LLM_KV_CACHE", False)
-        self.llm_kv_cache_bytes = _env_int("MYRA_LLM_KV_CACHE_MB", 512) * 1024 * 1024
 
         self.history_window = _env_int("MYRA_HISTORY_WINDOW", 20)
 
