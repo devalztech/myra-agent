@@ -274,10 +274,265 @@ class AgnesProvider(BaseProvider):
         return (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
 
 
+class OpenAICompatibleProvider(BaseProvider):
+    """Shared base for remote OpenAI-compatible chat-completions endpoints.
+
+    Subclasses only declare id/name/kind plus the three config getters
+    (api_key, base_url, model) and optionally a timeout. Streaming and
+    non-streaming both go through urllib; errors surface as LLMUnavailable.
+    """
+
+    kind = "remote"
+
+    # --- subclass overrides ---------------------------------------------
+    @property
+    def api_key(self) -> str:
+        raise NotImplementedError
+
+    @property
+    def base_url(self) -> str:
+        raise NotImplementedError
+
+    @property
+    def model_name(self) -> str:
+        raise NotImplementedError
+
+    _timeout = 180
+
+    # --- shared behaviour ------------------------------------------------
+    @property
+    def model(self) -> str | None:
+        return self.model_name
+
+    @property
+    def available(self) -> bool:
+        return bool(self.api_key)
+
+    @property
+    def detail(self) -> str | None:
+        if not self.api_key:
+            return f"Set {self._key_env} in .env to enable {self.name}."
+        return self.base_url
+
+    @property
+    def _key_env(self) -> str:
+        # Derive an env var name like GROQ_API_KEY from the class name.
+        name = self.id.upper()
+        return f"{name}_API_KEY"
+
+    def _request(self, messages: list[Message], stream: bool) -> urllib.request.Request:
+        if not self.api_key:
+            raise LLMUnavailable(f"{self.name} is not configured (missing {self._key_env}).")
+        payload = {
+            "model": self.model_name,
+            "messages": messages,
+            "temperature": settings.temperature,
+            "stream": stream,
+        }
+        return urllib.request.Request(
+            self.base_url.rstrip("/") + "/chat/completions",
+            data=json.dumps(payload).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+            method="POST",
+        )
+
+    def stream(self, messages: list[Message]) -> Iterator[str]:
+        request = self._request(messages, stream=True)
+        try:
+            with urllib.request.urlopen(request, timeout=self._timeout) as resp:
+                for raw in resp:
+                    line = raw.decode("utf-8", errors="replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data in {"", "[DONE]"}:
+                        continue
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    delta = (chunk.get("choices") or [{}])[0].get("delta", {})
+                    piece = delta.get("content")
+                    if piece:
+                        yield piece
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")[:400]
+            raise LLMUnavailable(f"{self.name} error {exc.code}: {body}") from exc
+        except urllib.error.URLError as exc:
+            raise LLMUnavailable(f"{self.name} unreachable: {exc.reason}") from exc
+
+    def complete(self, messages: list[Message]) -> str:
+        request = self._request(messages, stream=False)
+        try:
+            with urllib.request.urlopen(request, timeout=self._timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")[:400]
+            raise LLMUnavailable(f"{self.name} error {exc.code}: {body}") from exc
+        except urllib.error.URLError as exc:
+            raise LLMUnavailable(f"{self.name} unreachable: {exc.reason}") from exc
+        return (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+
+
+class GroqProvider(OpenAICompatibleProvider):
+    id = "groq"
+    name = "Groq (fast, free tier)"
+    _timeout = 180
+
+    @property
+    def api_key(self) -> str:
+        return settings.groq_api_key
+
+    @property
+    def base_url(self) -> str:
+        return settings.groq_base_url
+
+    @property
+    def model_name(self) -> str:
+        return settings.groq_model
+
+
+class SambaNovaProvider(OpenAICompatibleProvider):
+    id = "sambanova"
+    name = "SambaNova (free hosted)"
+    _timeout = 180
+
+    @property
+    def api_key(self) -> str:
+        return settings.sambanova_api_key
+
+    @property
+    def base_url(self) -> str:
+        return settings.sambanova_base_url
+
+    @property
+    def model_name(self) -> str:
+        return settings.sambanova_model
+
+
+class ScalewayProvider(OpenAICompatibleProvider):
+    id = "scaleway"
+    name = "Scaleway (free hosted)"
+    _timeout = 180
+
+    @property
+    def api_key(self) -> str:
+        return settings.scaleway_api_key
+
+    @property
+    def base_url(self) -> str:
+        return settings.scaleway_base_url
+
+    @property
+    def model_name(self) -> str:
+        return settings.scaleway_model
+
+
+class PollinationsProvider(BaseProvider):
+    """Pollinations.ai — fully keyless OpenAI-compatible chat completions.
+
+    Uses httpx rather than urllib: Pollinations sits behind Cloudflare and
+    TLS-fingerprints clients, returning 402/403 to Python's default urllib
+    stack, while httpx + a browser User-Agent sails through. No API key.
+    Verified working anonymously against its legacy text API.
+    """
+
+    id = "pollinations"
+    name = "Pollinations (keyless)"
+    kind = "remote"
+
+    _HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0 Safari/537.36"
+        ),
+    }
+
+    @property
+    def model(self) -> str | None:
+        return settings.pollinations_model
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    @property
+    def detail(self) -> str | None:
+        return "Keyless — no API key required."
+
+    def _payload(self, messages: list[Message], stream: bool) -> dict[str, object]:
+        return {
+            "model": settings.pollinations_model,
+            "messages": messages,
+            "temperature": settings.temperature,
+            "stream": stream,
+        }
+
+    def complete(self, messages: list[Message]) -> str:
+        import httpx
+
+        try:
+            resp = httpx.post(
+                settings.pollinations_base_url.rstrip("/"),
+                json=self._payload(messages, stream=False),
+                headers=self._HEADERS,
+                timeout=120,
+            )
+        except httpx.RequestError as exc:
+            raise LLMUnavailable(f"Pollinations unreachable: {exc}") from exc
+        if resp.status_code != 200:
+            raise LLMUnavailable(f"Pollinations error {resp.status_code}: {resp.text[:400]}")
+        try:
+            data = resp.json()
+        except ValueError:
+            raise LLMUnavailable(f"Pollinations returned invalid JSON: {resp.text[:200]}")
+        return (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+
+    def stream(self, messages: list[Message]) -> Iterator[str]:
+        import httpx
+
+        try:
+            with httpx.stream(
+                "POST",
+                settings.pollinations_base_url.rstrip("/"),
+                json=self._payload(messages, stream=True),
+                headers=self._HEADERS,
+                timeout=180,
+            ) as resp:
+                if resp.status_code != 200:
+                    body = "".join(resp.iter_text()) or ""
+                    raise LLMUnavailable(f"Pollinations error {resp.status_code}: {body[:400]}")
+                for line in resp.iter_lines():
+                    line = line.strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data in {"", "[DONE]"}:
+                        continue
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    delta = (chunk.get("choices") or [{}])[0].get("delta", {})
+                    piece = delta.get("content")
+                    if piece:
+                        yield piece
+        except httpx.RequestError as exc:
+            raise LLMUnavailable(f"Pollinations unreachable: {exc}") from exc
+
+
 _PROVIDERS: dict[str, BaseProvider] = {
     LocalProvider.id: LocalProvider(),
     AgnesProvider.id: AgnesProvider(),
     GeminiProvider.id: GeminiProvider(),
+    GroqProvider.id: GroqProvider(),
+    SambaNovaProvider.id: SambaNovaProvider(),
+    ScalewayProvider.id: ScalewayProvider(),
+    PollinationsProvider.id: PollinationsProvider(),
     MockProvider.id: MockProvider(),
 }
 

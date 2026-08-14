@@ -24,7 +24,7 @@ from typing import Any
 
 from ..config import settings
 from ..llm.engine import LLMUnavailable
-from ..providers import BaseProvider, get_provider
+from ..providers import BaseProvider, get_provider, list_providers
 from ..workspace import UnsafePath, workspace_root
 from .context import build_context, history_window
 from .guardrails import (
@@ -246,6 +246,69 @@ class AgentRunner:
         # the old flat cost for no reason.
         return max(1500, min(8000, int(context_size * 4 * 0.33)))
 
+    def _failover_chain(self) -> list[BaseProvider]:
+        """Ordered provider list for this run, primary first.
+
+        Primary = the provider chosen for this run. The rest are the other
+        configured remote providers (remote only — never auto-fail over to a
+        heavyweight local model the box may not handle) and finally the
+        local provider as a true last resort. Deduped, primary stays first.
+        """
+        order = ["groq", "sambanova", "scaleway", "pollinations", "agnes", "gemini"]
+        chain: list[BaseProvider] = [self.provider]
+        seen = {self.provider.id}
+        for pid in order:
+            if pid in seen or pid == self.provider.id:
+                continue
+            try:
+                p = get_provider(pid)
+            except Exception:
+                continue
+            # Only include providers that are actually configured/available.
+            if not getattr(p, "available", False):
+                continue
+            seen.add(pid)
+            chain.append(p)
+        # Local as absolute last resort, only if not already in the chain.
+        if self.provider.id != "local":
+            try:
+                local = get_provider("local")
+                if getattr(local, "available", True):
+                    chain.append(local)
+            except Exception:
+                pass
+        return chain
+
+    def _complete_with_failover(
+        self, transcript: list[dict[str, str]], chain: list[BaseProvider]
+    ) -> str | None:
+        """Try each provider in the chain until one returns a reply.
+
+        Skips providers known to be unavailable and remembers the first
+        working provider so the rest of the turn keeps using it instead of
+        re-trying a dead one on every step. Returns None if all fail.
+        """
+        last_error: str | None = None
+        for provider in chain:
+            try:
+                raw = provider.complete(transcript).strip()
+                if raw:
+                    # Promote the working provider to the front so later
+                    # steps in this run reuse it.
+                    if provider is not chain[0]:
+                        chain.remove(provider)
+                        chain.insert(0, provider)
+                        logger.info("Agent failed over to provider: %s", provider.id)
+                    return raw
+            except LLMUnavailable as exc:
+                last_error = str(exc)
+                logger.warning("Provider %s unavailable, trying next: %s", provider.id, exc)
+            except Exception as exc:  # never let one provider kill the turn
+                last_error = f"{type(exc).__name__}: {exc}"
+                logger.warning("Provider %s error, trying next: %s", provider.id, exc)
+        logger.error("All providers failed. Last error: %s", last_error)
+        return None
+
     # -- run ------------------------------------------------------------
     def run(self, request: str, history: list[dict[str, str]] | None = None) -> Iterator[AgentEvent]:
         started = time.monotonic()
@@ -257,16 +320,26 @@ class AgentRunner:
         final_text: str | None = None
         repair_attempted = False
 
-        yield AgentEvent("run_start", {"provider": self.provider.id, "model": self.provider.model})
+        # Build an ordered failover chain: the chosen provider first, then
+        # every other configured remote provider (Groq -> SambaNova ->
+        # Scaleway -> Pollinations), with local inference as the last resort.
+        # If the primary is down / out of quota / unreachable, Myra keeps
+        # working instead of erroring out. Each provider is tried in order
+        # until one produces a non-empty reply.
+        chain = self._failover_chain()
+        logger.info("Agent provider chain: %s", [p.id for p in chain])
+        active = chain[0]
+        yield AgentEvent(
+            "run_start", {"provider": active.id, "model": active.model}
+        )
 
         while self.budget.charge_step():
-            try:
-                raw = self.provider.complete(transcript).strip()
-            except LLMUnavailable as exc:
-                yield AgentEvent("error", {"message": str(exc)})
-                return
-            except BudgetExceeded as exc:
-                yield AgentEvent("error", {"message": str(exc)})
+            raw = self._complete_with_failover(transcript, chain)
+            if raw is None:
+                yield AgentEvent(
+                    "error",
+                    {"message": "All configured providers failed. Please check your API keys and network."},
+                )
                 return
 
             action = _extract_action(raw)

@@ -57,7 +57,7 @@ export async function downloadWorkspaceFile(token: string, path: string): Promis
       { headers: { Authorization: `Bearer ${token}` } },
     );
   } catch {
-    throw new ApiError(`Cannot reach the Myra backend at ${API_URL}.`, 0);
+    throw new ApiError("Cannot reach the Myra backend. Please try again.", 0);
   }
   if (!response.ok) {
     throw new ApiError(await errorMessage(response), response.status);
@@ -92,7 +92,7 @@ export async function runAgent(
       }),
     });
   } catch {
-    throw new ApiError(`Cannot reach the Myra backend at ${API_URL}.`, 0);
+    throw new ApiError("Cannot reach the Myra backend. Please try again.", 0);
   }
 
   if (!response.ok || !response.body) {

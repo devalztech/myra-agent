@@ -62,7 +62,7 @@ export async function apiRequest<TResponse>(
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
   } catch {
-    throw new ApiError(`Cannot reach the Myra backend at ${API_URL}.`, 0);
+    throw new ApiError("Cannot reach the Myra backend. Please try again.", 0);
   }
 
   if (!response.ok) {
@@ -93,7 +93,7 @@ export async function apiStream(
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
   } catch {
-    throw new ApiError(`Cannot reach the Myra backend at ${API_URL}.`, 0);
+    throw new ApiError("Cannot reach the Myra backend. Please try again.", 0);
   }
 
   if (!response.ok || !response.body) {

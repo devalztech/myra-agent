@@ -185,6 +185,32 @@ class Settings:
         )
         self.gemini_model = _env("GEMINI_MODEL", "gemini-2.5-flash")
 
+        # --- free remote OpenAI-compatible providers -----------------------
+        # Groq — highest free tier (llama-3.1-8b-instant: ~14.4k req/day,
+        # 500k tokens/day, no card).
+        self.groq_api_key = _env("GROQ_API_KEY")
+        self.groq_base_url = _env("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
+        self.groq_model = _env("GROQ_MODEL", "llama-3.1-8b-instant")
+
+        # SambaNova Cloud — free hosted open models (DeepSeek, Llama, MiniMax).
+        self.sambanova_api_key = _env("SAMBANOVA_API_KEY")
+        self.sambanova_base_url = _env(
+            "SAMBANOVA_BASE_URL", "https://api.sambanova.ai/v1"
+        )
+        self.sambanova_model = _env("SAMBANOVA_MODEL", "Meta-Llama-3.3-70B-Instruct")
+
+        # Scaleway Generative APIs — free hosted open models.
+        self.scaleway_api_key = _env("SCALEWAY_API_KEY")
+        self.scaleway_base_url = _env("SCALEWAY_BASE_URL", "https://api.scaleway.ai/v1")
+        self.scaleway_model = _env("SCALEWAY_MODEL", "llama-3.3-70b-instruct")
+
+        # Pollinations — fully keyless OpenAI-compatible endpoint. Verified
+        # working anonymously (no API key) via its legacy text API.
+        self.pollinations_base_url = _env(
+            "POLLINATIONS_BASE_URL", "https://text.pollinations.ai/openai"
+        )
+        self.pollinations_model = _env("POLLINATIONS_MODEL", "openai")
+
         # --- agent workspace ---------------------------------------------
         # Myra's OWN working directory: /home/container/myra by default —
         # a dedicated subfolder INSIDE the Pterodactyl server directory
