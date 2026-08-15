@@ -33,6 +33,8 @@ import {
 
 import {
   fetchAgentSettings,
+  fetchOpenRouterFreeModels,
+  fetchProjects,
   fetchProviderConfigs,
   fetchProviders,
   fetchSessionEvents,
@@ -59,6 +61,7 @@ import { MyraAvatar, MyraLogo, MyraMark } from "@/components/myra/logo";
 import { Markdown } from "@/components/myra/markdown";
 import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
+import type { MyraProject, OpenRouterFreeModel } from "@/api/agent";
 import type {
   ActivityStep,
   AgentEvent,
@@ -226,6 +229,9 @@ function ChatPage() {
   const [error, setError] = useState<string | null>(null);
   const [model, setModel] = useState<ModelStatus | null>(null);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [projects, setProjects] = useState<MyraProject[]>([]);
+  const [openRouterFreeModels, setOpenRouterFreeModels] = useState<OpenRouterFreeModel[]>([]);
+  const [activeProject, setActiveProject] = useState<string>("");
   const [settings, setSettings] = useState<AgentSettings | null>(null);
   const [showApiKeys, setShowApiKeys] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
@@ -294,6 +300,16 @@ function ChatPage() {
     let cancelled = false;
     fetchProviders()
       .then((data) => !cancelled && setProviders(data.providers))
+      .catch(() => undefined);
+    fetchOpenRouterFreeModels()
+      .then((data) => !cancelled && setOpenRouterFreeModels(data.models))
+      .catch(() => undefined);
+    fetchProjects(token)
+      .then((data) => {
+        if (cancelled) return;
+        setProjects(data.projects);
+        setActiveProject((current) => current && data.projects.some((p) => p.slug === current) ? current : (data.projects[0]?.slug ?? ""));
+      })
       .catch(() => undefined);
     fetchAgentSettings(token)
       .then((data) => !cancelled && setSettings(data))
@@ -660,6 +676,7 @@ function ChatPage() {
             // ordinary message would make MYRA_APPROVAL_REQUIRED a no-op,
             // since the backend would always see a pre-approved request.
             approved: options?.approved ?? false,
+            project: activeProject || null,
             signal: controller.signal,
           },
           (frame) => {
@@ -1065,6 +1082,17 @@ function ChatPage() {
             <Menu className="size-5" />
           </button>
           <MyraLogo />
+          <select
+            aria-label="Active project"
+            value={activeProject}
+            onChange={(e) => setActiveProject(e.target.value)}
+            className="mx-2 max-w-[11rem] rounded-lg border border-hairline bg-surface px-2 py-1.5 text-xs text-foreground outline-none focus:border-royal/50"
+          >
+            <option value="">No project</option>
+            {projects.map((project) => (
+              <option key={project.id} value={project.slug}>{project.name}</option>
+            ))}
+          </select>
           <div className="flex-1" />
           <button
             type="button"
@@ -1532,18 +1560,38 @@ function ChatPage() {
                             }
                             className="w-full rounded-lg border border-hairline bg-surface px-3 py-2 text-[0.8125rem] text-foreground outline-none focus:border-royal/50"
                           />
-                          <input
-                            type="text"
-                            placeholder="Model (optional — defaults used if blank)"
-                            value={cfg.model ?? ""}
-                            onChange={(e) =>
-                              setProviderConfigs((prev) => ({
-                                ...prev,
-                                [provider.id]: { ...(prev[provider.id] ?? {}), model: e.target.value },
-                              }))
-                            }
-                            className="w-full rounded-lg border border-hairline bg-surface px-3 py-2 text-[0.8125rem] text-foreground outline-none focus:border-royal/50"
-                          />
+                          {provider.id === "openrouter" && openRouterFreeModels.length > 0 ? (
+                            <select
+                              aria-label="OpenRouter free model"
+                              value={cfg.model ?? openRouterFreeModels[0]?.id ?? ""}
+                              onChange={(e) =>
+                                setProviderConfigs((prev) => ({
+                                  ...prev,
+                                  [provider.id]: { ...(prev[provider.id] ?? {}), model: e.target.value },
+                                }))
+                              }
+                              className="w-full rounded-lg border border-hairline bg-surface px-3 py-2 text-[0.8125rem] text-foreground outline-none focus:border-royal/50"
+                            >
+                              {openRouterFreeModels.map((modelOption) => (
+                                <option key={modelOption.id} value={modelOption.id}>
+                                  {modelOption.name} — {modelOption.role}{modelOption.vision ? " · vision" : ""}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            <input
+                              type="text"
+                              placeholder="Model (optional — defaults used if blank)"
+                              value={cfg.model ?? ""}
+                              onChange={(e) =>
+                                setProviderConfigs((prev) => ({
+                                  ...prev,
+                                  [provider.id]: { ...(prev[provider.id] ?? {}), model: e.target.value },
+                                }))
+                              }
+                              className="w-full rounded-lg border border-hairline bg-surface px-3 py-2 text-[0.8125rem] text-foreground outline-none focus:border-royal/50"
+                            />
+                          )}
                           <button
                             type="button"
                             onClick={() => void saveProviderConfig(provider.id)}

@@ -71,6 +71,24 @@ class ChatMessage(Base):
 Index("ix_chat_messages_session_created", ChatMessage.session_id, ChatMessage.created_at)
 
 
+class Project(Base):
+    """First-class user project scope for workspace, memory and agent runs."""
+    __tablename__ = "projects"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    slug: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    root_path: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    instructions: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(32), default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+Index("ux_projects_user_slug", Project.user_id, Project.slug, unique=True)
+
+
 class Memory(Base):
     """Durable user preferences and project conventions."""
 
@@ -80,6 +98,7 @@ class Memory(Base):
     user_id: Mapped[str] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
     )
+    project: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
     key: Mapped[str] = mapped_column(String(160), nullable=False)
     value: Mapped[str] = mapped_column(Text, nullable=False)
     kind: Mapped[str] = mapped_column(String(32), default="preference")

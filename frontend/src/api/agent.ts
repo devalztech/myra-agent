@@ -5,6 +5,27 @@ export function fetchProviders(): Promise<{ providers: ProviderInfo[]; default: 
   return apiRequest<{ providers: ProviderInfo[]; default: string }>("/providers");
 }
 
+
+export type MyraProject = {
+  id: string; name: string; slug: string; rootPath: string | null;
+  description: string; instructions: string; status: string;
+  createdAt: string; updatedAt: string;
+};
+
+export function fetchProjects(token: string): Promise<{ projects: MyraProject[] }> {
+  return apiRequest<{ projects: MyraProject[] }>("/projects", { token });
+}
+
+export function createProject(token: string, body: { name: string; slug?: string; rootPath?: string; description?: string; instructions?: string }): Promise<MyraProject> {
+  return apiRequest<MyraProject>("/projects", { method: "POST", token, body });
+}
+
+export type OpenRouterFreeModel = { id: string; name: string; role: string; context: number | null; tools: boolean; vision: boolean };
+
+export function fetchOpenRouterFreeModels(): Promise<{ models: OpenRouterFreeModel[]; default: string }> {
+  return apiRequest<{ models: OpenRouterFreeModel[]; default: string }>("/providers/openrouter/free-models");
+}
+
 export function fetchAgentSettings(token: string): Promise<AgentSettings> {
   return apiRequest<AgentSettings>("/settings", { token });
 }
@@ -147,7 +168,7 @@ export async function runAgent(
   token: string,
   sessionId: string,
   content: string,
-  options: { provider?: string; approved?: boolean; signal?: AbortSignal },
+  options: { provider?: string; approved?: boolean; project?: string | null; signal?: AbortSignal },
   onEvent: (event: AgentEvent) => void,
 ): Promise<void> {
   const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -167,6 +188,7 @@ export async function runAgent(
           content,
           provider: options.provider ?? null,
           approved: options.approved ?? false,
+          project: options.project ?? null,
         }),
       });
     } catch {

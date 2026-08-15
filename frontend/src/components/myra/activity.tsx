@@ -129,11 +129,11 @@ function StepRow({
           )}
         >
           <span className="min-w-0 flex-1">
-            <span className="block truncate text-[0.9375rem] text-foreground/90">
+            <span className="block break-words text-[0.9375rem] leading-snug text-foreground/90">
               {step.label}
             </span>
             {step.detail && !open && (
-              <span className="mt-0.5 block truncate font-mono text-[0.75rem] text-muted-foreground">
+              <span className="mt-0.5 block break-words font-mono text-[0.75rem] leading-snug text-muted-foreground">
                 {step.detail}
               </span>
             )}

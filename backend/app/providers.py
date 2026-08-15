@@ -507,7 +507,59 @@ class PollinationsProvider(BaseProvider):
             raise LLMUnavailable(f"Pollinations unreachable: {exc}") from exc
 
 
+
+class OpenRouterProvider(OpenAICompatibleProvider):
+    """OpenRouter OpenAI-compatible provider, including curated free models."""
+    id = "openrouter"
+    name = "OpenRouter (free + routed models)"
+    _timeout = 180
+
+    @property
+    def _default_api_key(self) -> str:
+        return settings.openrouter_api_key
+
+    @property
+    def _default_base_url(self) -> str:
+        return settings.openrouter_base_url
+
+    @property
+    def _default_model(self) -> str:
+        return settings.openrouter_model
+
+    def _request(self, messages: list[Message], stream: bool) -> urllib.request.Request:
+        req = super()._request(messages, stream)
+        headers = dict(req.headers)
+        if settings.openrouter_http_referer:
+            headers["HTTP-Referer"] = settings.openrouter_http_referer
+        if settings.openrouter_title:
+            headers["X-Title"] = settings.openrouter_title
+        return urllib.request.Request(req.full_url, data=req.data, headers=headers, method="POST")
+
+    @property
+    def detail(self) -> str | None:
+        if not self.api_key:
+            return "Set OPENROUTER_API_KEY in .env to enable OpenRouter."
+        return f"{self.base_url} · model={self.model_name}"
+
+
+# Curated free models selected for agentic coding, long context, reasoning,
+# tool use, or multimodal browser work. Kept explicit so Myra does not
+# accidentally select an unstable/weak free model from the whole catalog.
+OPENROUTER_FREE_MODELS: list[dict[str, object]] = [
+    {"id": "nvidia/nemotron-3-ultra:free", "name": "Nemotron 3 Ultra", "role": "reasoning/agents", "context": 1_000_000, "tools": True, "vision": False},
+    {"id": "poolside/laguna-s-2.1:free", "name": "Laguna S 2.1", "role": "coding agent", "context": 262_144, "tools": True, "vision": False},
+    {"id": "nvidia/nemotron-3-super:free", "name": "Nemotron 3 Super", "role": "reasoning/agents", "context": 262_144, "tools": True, "vision": False},
+    {"id": "cohere/north-mini-code:free", "name": "North Mini Code", "role": "coding agent", "context": 262_144, "tools": True, "vision": False},
+    {"id": "nvidia/nemotron-3.5-lightning:free", "name": "Nemotron 3.5 Lightning", "role": "fast agents", "context": 1_000_000, "tools": True, "vision": False},
+    {"id": "poolside/laguna-xs-2.1:free", "name": "Laguna XS 2.1", "role": "fast coding", "context": 262_144, "tools": True, "vision": False},
+    {"id": "nvidia/nemotron-3-nano-omni:free", "name": "Nemotron 3 Nano Omni", "role": "browser/vision", "context": 262_144, "tools": True, "vision": True},
+    {"id": "google/gemma-4-26b-a4b:free", "name": "Gemma 4 26B A4B", "role": "multimodal/tools", "context": 262_144, "tools": True, "vision": True},
+    {"id": "openai/gpt-oss-120b:free", "name": "GPT-OSS 120B", "role": "reasoning/agents", "context": 131_072, "tools": True, "vision": False},
+    {"id": "openrouter/free", "name": "OpenRouter Free Router", "role": "automatic free fallback", "context": None, "tools": True, "vision": True},
+]
+
 _PROVIDERS: dict[str, BaseProvider] = {
+    "openrouter": OpenRouterProvider(),
     AgnesProvider.id: AgnesProvider(),
     GeminiProvider.id: GeminiProvider(),
     GroqProvider.id: GroqProvider(),

@@ -689,15 +689,31 @@ def db_schema(path: str) -> str:
 )
 def preview(action: str, path: str = ".") -> dict[str, Any]:
     from ..services.preview import health, start, stop
+    from ..config import settings
 
     root = safe_path(path, must_exist=True)
+    base = settings.public_api_url.strip() or ""
+    if not base:
+        base = settings.cors_origins[0] if getattr(settings, "cors_origins", None) else ""
+    base = (base or "").rstrip("/")
+
+    def _public(result: dict[str, Any]) -> dict[str, Any]:
+        if base and result.get("running"):
+            rel = relative(root)
+            result["public_url"] = f"{base}/preview/serve/{rel}"
+            result["note"] = (
+                "Users open the public_url in their own browser — NOT the local port, "
+                "which is only reachable from inside the sandbox."
+            )
+        return result
+
     action = (action or "").strip().lower()
     if action == "start":
-        return start(root)
+        return _public(start(root))
     if action == "stop":
         return stop(root)
     if action in ("health", "status"):
-        return health(root)
+        return _public(health(root))
     return {"error": f"Unknown action: {action}. Use start, stop, or health."}
 
 

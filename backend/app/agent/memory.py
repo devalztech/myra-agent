@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 import json
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -23,6 +24,7 @@ from ..models import Memory, utcnow
 # remove it for good. Purge is never automatic/scheduled on its own — call
 # sites decide when to run it — this constant just defines "expired".
 TRASH_TTL_DAYS = 30
+LOG_CAP = 200  # keep at most this many auto-log entries per user (prune older)
 
 STOPWORDS = {
     "the", "a", "an", "and", "or", "to", "of", "in", "for", "with", "on", "is",
@@ -38,6 +40,7 @@ def _tokens(text: str) -> set[str]:
 class MemoryStore:
     db: Session
     user_id: str
+    project: str | None = None
 
     # -- working / auto memory ----------------------------------------
     TASK_STATE_KEY = "task.current"
@@ -56,7 +59,7 @@ class MemoryStore:
             line += f" {detail}"
         if result:
             line += f" -> {result[:200]}"
-        return self.remember(f"log.{int(time.time())}", line, kind="log")
+        return self.remember(f"log.{int(time.time())}.{uuid.uuid4().hex[:6]}", line, kind="log")
 
     def set_task_state(self, summary: str, *, goal: str = "", progress: str = "", next_step: str = "") -> Memory:
         """Record what myra is currently working on and where it is.
@@ -107,11 +110,40 @@ class MemoryStore:
             self.db.commit()
         return len(logs)
 
+    def prune_logs(self, cap: int = LOG_CAP) -> int:
+        """Trim old auto-logs so memory never balloons.
+
+        Keeps the newest ``cap`` log entries and hard-deletes the rest (logs are
+        transient working memory — the durable facts live in preference/convention
+        memories). Called after each run so the DB stays small and the digest fast.
+        """
+        logs = [m for m in self.all() if m.kind == "log"]
+        logs.sort(key=lambda m: m.updated_at or m.created_at, reverse=True)
+        stale = logs[cap:]
+        for m in stale:
+            self.db.delete(m)
+        if stale:
+            self.db.commit()
+        return len(stale)
+
+    def learn(self, key: str, value: str, *, kind: str = "convention") -> Memory:
+        """Persist a durable lesson distilled from a run (auto-reflection).
+
+        Same dedup as remember() but defaults to 'convention' and is intended
+        for auto-extracted facts, not user-typed ones. Upserts on key so the
+        same lesson doesn't duplicate over many runs.
+        """
+        return self.remember(key=key, value=value, kind=kind)
+
     # -- writes ---------------------------------------------------------
     def remember(self, key: str, value: str, kind: str = "preference") -> Memory:
         key = (key or "").strip()[:160] or "note"
         existing = self.db.scalar(
-            select(Memory).where(Memory.user_id == self.user_id, Memory.key == key)
+            select(Memory).where(
+                Memory.user_id == self.user_id,
+                Memory.project == self.project,
+                Memory.key == key,
+            )
         )
         if existing:
             existing.value = value
@@ -120,7 +152,9 @@ class MemoryStore:
             existing.deleted_at = None  # re-remembering un-forgets it too
             entry = existing
         else:
-            entry = Memory(user_id=self.user_id, key=key, value=value, kind=kind)
+            entry = Memory(
+                user_id=self.user_id, project=self.project, key=key, value=value, kind=kind
+            )
             self.db.add(entry)
         self.db.commit()
         self.db.refresh(entry)
@@ -178,36 +212,56 @@ class MemoryStore:
 
     # -- reads ----------------------------------------------------------
     def all(self) -> list[Memory]:
+        # Project scope includes project-specific memories plus global memories.
+        # Project-specific entries win during retrieval, while global preferences
+        # remain available to every project.
+        filters = [Memory.user_id == self.user_id, Memory.deleted_at.is_(None)]
+        if self.project:
+            filters.append((Memory.project == self.project) | (Memory.project.is_(None)))
         return list(
             self.db.scalars(
                 select(Memory)
-                .where(Memory.user_id == self.user_id, Memory.deleted_at.is_(None))
+                .where(*filters)
                 .order_by(Memory.updated_at.desc())
             )
         )
 
     def trash(self) -> list[Memory]:
         """Forgotten-but-not-yet-purged memories, most recently deleted first."""
+        filters = [Memory.user_id == self.user_id, Memory.deleted_at.is_not(None)]
+        if self.project:
+            filters.append(Memory.project == self.project)
         return list(
             self.db.scalars(
                 select(Memory)
-                .where(Memory.user_id == self.user_id, Memory.deleted_at.is_not(None))
+                .where(*filters)
                 .order_by(Memory.deleted_at.desc())
             )
         )
 
     def search(self, query: str = "", limit: int = 12) -> list[dict[str, str]]:
         entries = self.all()
+        now = time.time()
         if query:
             wanted = _tokens(query)
             scored = sorted(
                 entries,
-                key=lambda m: len(wanted & _tokens(f"{m.key} {m.value}")),
+                key=lambda m: (
+                    len(wanted & _tokens(f"{m.key} {m.value}")),
+                    # fresher entries win ties (recency-aware retrieval)
+                    -abs((m.updated_at or m.created_at).timestamp() - now),
+                ),
                 reverse=True,
             )
             entries = [m for m in scored if wanted & _tokens(f"{m.key} {m.value}")] or entries
         return [
-            {"id": m.id, "key": m.key, "value": m.value, "kind": m.kind}
+            {
+                "id": m.id,
+                "key": m.key,
+                "value": m.value,
+                "kind": m.kind,
+                "updatedAt": (m.updated_at or m.created_at).isoformat(),
+            }
             for m in entries[:limit]
         ]
 

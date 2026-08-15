@@ -92,6 +92,18 @@ When the work is finished (or the user only wants a conversation):
 - You are a SENIOR engineer, not a junior: make reasonable decisions yourself,
   anticipate edge cases, refactor for clarity, and verify your work. Don't ask
   permission for obvious next steps.
+- You are a self-reflecting agent. Before finishing, ask yourself: did my code
+  actually run and pass? Did I meet what the user asked for, or is it rough?
+  Is this the right approach, or is there a cleaner way? What's the next step
+  that makes this genuinely done?
+- Keep looping until it works: write code -> run it -> hit a bug -> debug ->
+  install missing deps -> fix -> test again. Do NOT stop at the first error or
+  the first working attempt. Only call it done once it's verified end-to-end.
+- When a tool returns an error, treat it as data: read it, form a hypothesis,
+  fix it, and retry. Never report a bug as the final answer without trying to
+  fix it first.
+- Install dependencies yourself when something is missing (`run_command`), then
+  continue — don't stop and ask.
 - Before diving in, form a short plan and track it. The "Current task state"
   block in your context shows what you already did and what's next — READ it
   and continue from there instead of starting over or re-reading what you
@@ -112,6 +124,9 @@ When the work is finished (or the user only wants a conversation):
   form: `![alt text](download:relative/path/image.png)`. The app renders it as
   a real image right in the chat — do NOT wrap it as a [file](...) link and do
   NOT describe it with braces or brackets.
+- When you start a preview server, NEVER give the user a `localhost:PORT` link
+  (that only works inside the sandbox). Use the `public_url` the `preview` tool
+  returns, and link it as `[View Live Preview](public_url)`.
 
 ## Available tools
 {tools}
@@ -234,6 +249,19 @@ REPAIR_NUDGE = (
 )
 
 
+BUILD_TASK_HINTS = (
+    "build", "create", "write", "fix", "debug", "make", "implement", "refactor",
+    "feature", "app", "website", "page", "component", "function", "script",
+    "landing", "api", "test", "error", "bug", "run", "deploy", "project",
+)
+
+
+def _looks_like_build_task(request: str) -> bool:
+    """True if the user's request looks like a coding/build task worth verifying."""
+    text = (request or "").lower()
+    return any(hint in text for hint in BUILD_TASK_HINTS)
+
+
 class AgentRunner:
     """Runs one user turn to completion, yielding events as it goes."""
 
@@ -245,6 +273,8 @@ class AgentRunner:
         budget: RunBudget | None = None,
         approved: bool = False,
         session_id: str | None = None,
+        project: str | None = None,
+        project_instructions: str = "",
     ) -> None:
         self.provider = provider or get_provider()
         self.memory = memory
@@ -255,6 +285,8 @@ class AgentRunner:
         # of every browser tool call getting its own private incognito
         # instance.
         self.session_id = session_id
+        self.project = project
+        self.project_instructions = project_instructions.strip()
 
     # -- prompt ---------------------------------------------------------
     def system_prompt(self, request: str) -> str:
@@ -262,6 +294,10 @@ class AgentRunner:
             "{skills}", ", ".join(skill_names())
         )
         blocks = [base, f"Workspace root: {workspace_root()}"]
+        if self.project:
+            blocks.append(f"Active project: {self.project}")
+        if self.project_instructions:
+            blocks.append("Project instructions (follow these unless they conflict with safety):\n" + self.project_instructions)
         if self.memory is not None:
             digest = self.memory.digest(request)
             if digest:
@@ -287,7 +323,7 @@ class AgentRunner:
         heavyweight local model the box may not handle) and finally the
         local provider as a true last resort. Deduped, primary stays first.
         """
-        order = ["groq", "sambanova", "scaleway", "pollinations", "agnes", "gemini"]
+        order = ["openrouter", "groq", "sambanova", "scaleway", "pollinations", "agnes", "gemini"]
         chain: list[BaseProvider] = [self.provider]
         seen = {self.provider.id}
         for pid in order:
@@ -347,6 +383,11 @@ class AgentRunner:
         ]
         final_text: str | None = None
         repair_attempted = False
+        # Tracks tool failures/errors across the run so the self-reflection
+        # phase can see what went wrong and decide whether to keep fixing.
+        issues: list[str] = []
+        verification_rounds = 0
+        MAX_VERIFY_ROUNDS = 3
 
         # Build an ordered failover chain: the chosen provider first, then
         # every other configured remote provider (Groq -> SambaNova ->
@@ -410,6 +451,7 @@ class AgentRunner:
 
             if name not in TOOLS:
                 observation = f"Unknown tool '{name}'. Valid tools: {', '.join(TOOLS)}"
+                issues.append(f"Unknown tool {name}")
                 yield AgentEvent("tool_error", {"tool": name, "message": observation})
             else:
                 tool_def = TOOLS[name]
@@ -457,6 +499,11 @@ class AgentRunner:
                             self.memory.log_step(name, detail, result=observation[:200])
                         except Exception:
                             pass
+                    # If a verification/test/browser action returned something
+                    # that reads like a failure, record it for reflection.
+                    lowered = observation.lower()
+                    if any(marker in lowered for marker in ("fail", "error", "traceback", "exception", "not found", "missing", "blocked")):
+                        issues.append(f"{name}: {observation[:200]}")
                 except ApprovalRequired as exc:
                     # Actionable, not a dead end like the other two: stop the
                     # run right here (don't let the model spend another step
@@ -513,6 +560,86 @@ class AgentRunner:
                 {"role": "user", "content": f"Observation from {name}:\n{truncate(observation, 4000)}"}
             )
 
+        # ---- SELF-REFLECTION / VERIFICATION LOOP ---------------------------
+        # The main loop stops the moment the model emits a `final`. That's too
+        # eager for a coding task: Myra should verify its own work and keep
+        # fixing until it meets the goal. So after the loop, if there were
+        # failures (or the work is the kind that should be verified), run a
+        # bounded reflection pass: show the model what it did + what failed,
+        # and let it decide to (a) continue fixing or (b) confirm done.
+        while (
+            self.budget.charge_step()
+            and verification_rounds < MAX_VERIFY_ROUNDS
+            and (issues or _looks_like_build_task(request))
+        ):
+            verification_rounds += 1
+            summary = (
+                f"You just attempted: {request[:200]}\n"
+                "You marked this as finished. Before you finalize, reflect:\n"
+                "1. Did your code/tests actually pass, or did something fail? "
+                f"Known issues this run: {issues[-5:] if issues else 'none'}\n"
+                "2. Look at it from the user's perspective — did you fully meet "
+                "their expectation, or is it still rough (UX, correctness, edge cases)?\n"
+                "3. Is there a next step that would make this genuinely done?\n\n"
+                "If the work is truly complete and verified, reply with exactly:\n"
+                '{"thought": "verified and done", "final": "<your final message>"}\n'
+                "Otherwise, make ONE more tool call to fix/verify it "
+                '(e.g. run_tests, edit_file, browser preview). Do not just restate the problem.'
+            )
+            transcript.append({"role": "user", "content": summary})
+            raw = self._complete_with_failover(transcript, chain)
+            if raw is None:
+                break
+            action = _extract_action(raw)
+            if action is None:
+                break  # give up quietly on malformed reflection
+
+            yield AgentEvent("thought", {"text": "Reflecting on my work…"})
+
+            if action.get("final") is not None:
+                # Model verified and confirmed done.
+                final_text = str(action["final"])
+                break
+
+            name = str(action.get("tool") or "")
+            arguments = action.get("arguments") or action.get("args") or {}
+            if not isinstance(arguments, dict):
+                arguments = {}
+            if name not in TOOLS:
+                break
+            try:
+                self.budget.charge_tool()
+                if name == "run_command":
+                    arguments.setdefault("timeout", settings.tool_timeout_seconds)
+                result = call_tool(
+                    name,
+                    arguments,
+                    memory=self.memory,
+                    session_id=self.session_id,
+                    approved=self.approved,
+                )
+                observation = result if isinstance(result, str) else json.dumps(json_safe(result))[:8000]
+                yield AgentEvent(
+                    "tool_end",
+                    {"tool": name, "label": TOOLS[name].label, "status": "ok", "result": truncate(observation, 4000)},
+                )
+                if self.memory is not None:
+                    try:
+                        self.memory.log_step(name, result=observation[:200])
+                    except Exception:
+                        pass
+            except Exception as exc:  # noqa: BLE001
+                issues.append(f"{name}: {exc}")
+                yield AgentEvent(
+                    "tool_end",
+                    {"tool": name, "label": TOOLS[name].label, "status": "error", "result": str(exc)},
+                )
+
+            transcript.append({"role": "assistant", "content": json.dumps(action)})
+            transcript.append(
+                {"role": "user", "content": f"Observation from {name}:\n{truncate(observation, 4000)}"}
+            )
+
         if final_text is None:
             final_text = (
                 "I reached my step limit for this turn. Here's where I stopped — ask me to continue "
@@ -525,6 +652,12 @@ class AgentRunner:
         if self.memory is not None:
             try:
                 self.memory.log_step("run.completed", detail=request[:120], result=final_text[:200])
+                # Harden: prune old transient logs so memory never balloons and
+                # the digest stays fast on the next run.
+                try:
+                    self.memory.prune_logs()
+                except Exception:
+                    pass
                 if final_text and not self.memory.get_task_state().get("done"):
                     pass  # keep task state; cleared explicitly by user/task tool
             except Exception:

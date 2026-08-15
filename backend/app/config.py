@@ -165,6 +165,14 @@ class Settings:
         )
         self.pollinations_model = _env("POLLINATIONS_MODEL", "openai")
 
+        # OpenRouter — OpenAI-compatible gateway. Keep the key in environment
+        # variables/user settings only; never commit secrets.
+        self.openrouter_api_key = _env("OPENROUTER_API_KEY")
+        self.openrouter_base_url = _env("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+        self.openrouter_model = _env("OPENROUTER_MODEL", "nvidia/nemotron-3-ultra:free")
+        self.openrouter_http_referer = _env("OPENROUTER_HTTP_REFERER", "")
+        self.openrouter_title = _env("OPENROUTER_TITLE", "Myra Agent")
+
         # --- agent workspace ---------------------------------------------
         # Myra's OWN working directory: /home/container/myra by default —
         # a dedicated subfolder INSIDE the Pterodactyl server directory

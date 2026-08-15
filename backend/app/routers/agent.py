@@ -26,8 +26,8 @@ from ..config import settings
 from ..database import SessionLocal, get_db
 from ..deps import get_current_user, get_owned_session
 from ..llmutil import title_from_message
-from ..models import AgentEventRow, ChatMessage, Memory, ScheduledTask, User, UserSettings, _uuid, utcnow
-from ..providers import get_provider, list_providers
+from ..models import AgentEventRow, ChatMessage, Memory, Project, ScheduledTask, User, UserSettings, _uuid, utcnow
+from ..providers import OPENROUTER_FREE_MODELS, get_provider, list_providers
 from ..scheduler import run_task_now
 from ..workspace import UnsafePath, relative, safe_path, workspace_info, workspace_root
 
@@ -136,6 +136,84 @@ def providers() -> dict[str, object]:
     return {"providers": list_providers(), "default": settings.default_provider}
 
 
+@router.get("/providers/openrouter/free-models")
+def openrouter_free_models() -> dict[str, object]:
+    """Curated advanced free models; no API key is required to browse this list."""
+    return {"models": OPENROUTER_FREE_MODELS, "default": settings.openrouter_model}
+
+
+# --------------------------------------------------------------------------
+# projects
+# --------------------------------------------------------------------------
+
+class ProjectPayload(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    slug: str | None = Field(default=None, max_length=160)
+    rootPath: str | None = Field(default=None, max_length=1000)
+    description: str = Field(default="", max_length=4000)
+    instructions: str = Field(default="", max_length=12000)
+
+
+def _project_slug(value: str) -> str:
+    import re
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug[:160] or "project"
+
+
+def _project_out(p: Project) -> dict[str, object]:
+    return {
+        "id": p.id, "name": p.name, "slug": p.slug, "rootPath": p.root_path,
+        "description": p.description, "instructions": p.instructions,
+        "status": p.status, "createdAt": p.created_at.isoformat(), "updatedAt": p.updated_at.isoformat(),
+    }
+
+
+@router.get("/projects")
+def list_projects(db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> dict[str, object]:
+    rows = list(db.scalars(select(Project).where(Project.user_id == user.id).order_by(Project.updated_at.desc())))
+    return {"projects": [_project_out(p) for p in rows]}
+
+
+@router.post("/projects", status_code=status.HTTP_201_CREATED)
+def create_project(payload: ProjectPayload, db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> dict[str, object]:
+    slug = _project_slug(payload.slug or payload.name)
+    if db.scalar(select(Project).where(Project.user_id == user.id, Project.slug == slug)):
+        raise HTTPException(status_code=409, detail="A project with that slug already exists.")
+    root = (payload.rootPath or "").strip() or None
+    if root:
+        try:
+            safe_path(root)
+        except UnsafePath as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    p = Project(user_id=user.id, name=payload.name.strip(), slug=slug, root_path=root, description=payload.description, instructions=payload.instructions)
+    db.add(p); db.commit(); db.refresh(p)
+    return _project_out(p)
+
+
+@router.patch("/projects/{project_id}")
+def update_project(project_id: str, payload: ProjectPayload, db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> dict[str, object]:
+    p = db.scalar(select(Project).where(Project.id == project_id, Project.user_id == user.id))
+    if not p: raise HTTPException(status_code=404, detail="Project not found.")
+    slug = _project_slug(payload.slug or payload.name)
+    clash = db.scalar(select(Project).where(Project.user_id == user.id, Project.slug == slug, Project.id != p.id))
+    if clash: raise HTTPException(status_code=409, detail="A project with that slug already exists.")
+    if payload.rootPath:
+        try: safe_path(payload.rootPath.strip())
+        except UnsafePath as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
+    p.name = payload.name.strip(); p.slug = slug; p.root_path = (payload.rootPath or "").strip() or None
+    p.description = payload.description; p.instructions = payload.instructions; p.updated_at = utcnow()
+    db.commit(); db.refresh(p); return _project_out(p)
+
+
+@router.delete("/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
+def delete_project(project_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> None:
+    p = db.scalar(select(Project).where(Project.id == project_id, Project.user_id == user.id))
+    if not p: raise HTTPException(status_code=404, detail="Project not found.")
+    db.delete(p)
+    db.execute(__import__('sqlalchemy').delete(Memory).where(Memory.user_id == user.id, Memory.project == p.slug))
+    db.commit()
+
+
 @router.get("/settings")
 def read_settings(
     db: Session = Depends(get_db), user: User = Depends(get_current_user)
@@ -221,6 +299,7 @@ class AgentRunPayload(BaseModel):
     content: str = Field(min_length=1, max_length=16000)
     provider: str | None = None
     approved: bool = False
+    project: str | None = Field(default=None, max_length=160)
 
 
 def _sse(event: dict[str, object]) -> str:
@@ -266,6 +345,12 @@ def run_agent(
     db.refresh(user_message)
 
     row = _settings_row(db, user)
+    project_name = (payload.project or "").strip() or None
+    if project_name:
+        project_row = db.scalar(select(Project).where(Project.user_id == user.id, (Project.id == project_name) | (Project.slug == project_name)))
+        if project_row is None:
+            raise HTTPException(status_code=404, detail="Project not found.")
+        project_name = project_row.slug
     provider_id = payload.provider or row.provider
     user_message_out = {
         "id": user_message.id,
@@ -325,13 +410,21 @@ def run_agent(
                 # local_db while the worker writes memory to the same session.
                 worker_db = SessionLocal()
                 try:
-                    worker_memory = MemoryStore(db=worker_db, user_id=user_id)
+                    project = project_name
+                    project_instructions = ""
+                    if project:
+                        p_row = worker_db.scalar(select(Project).where(Project.user_id == user_id, Project.slug == project))
+                        if p_row:
+                            project_instructions = p_row.instructions or ""
+                    worker_memory = MemoryStore(db=worker_db, user_id=user_id, project=project)
                     worker_runner = AgentRunner(
                         provider=provider,
                         memory=worker_memory,
                         budget=budget,
                         approved=payload.approved,
                         session_id=session_id,
+                        project=project,
+                        project_instructions=project_instructions,
                     )
                     for event in worker_runner.run(prompt, history):
                         # If the user asked to stop, stop persisting/forwarding
