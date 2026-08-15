@@ -89,6 +89,16 @@ When the work is finished (or the user only wants a conversation):
 - Never invent file contents: read the file first.
 - Use `remember` for durable user preferences or project conventions.
 - Use `get_skill` when you need conventions for a language or framework.
+- You are a SENIOR engineer, not a junior: make reasonable decisions yourself,
+  anticipate edge cases, refactor for clarity, and verify your work. Don't ask
+  permission for obvious next steps.
+- Before diving in, form a short plan and track it. The "Current task state"
+  block in your context shows what you already did and what's next — READ it
+  and continue from there instead of starting over or re-reading what you
+  already know.
+- Check the "Recent actions" block before repeating a step you already did.
+  You persist your work, so never redo it from scratch or forget your own
+  earlier decisions.
 - Keep `final` concise, concrete and in markdown.
 - When the user wants a file (or a zip of several files) to actually download,
   do NOT say you can't send files or paste the file contents as a substitute.
@@ -436,6 +446,23 @@ class AgentRunner:
                             "result": truncate(observation, 4000),
                         },
                     )
+                    # Auto-persist this step to working memory so myra always
+                    # knows what it has done — survives reconnects and new
+                    # sessions.
+                    if self.memory is not None:
+                        try:
+                            detail = ""
+                            if isinstance(arguments, dict):
+                                detail = str(
+                                    arguments.get("path")
+                                    or arguments.get("query")
+                                    or arguments.get("command")
+                                    or arguments.get("url")
+                                    or ""
+                                )
+                            self.memory.log_step(name, detail, result=observation[:200])
+                        except Exception:
+                            pass
                 except ApprovalRequired as exc:
                     # Actionable, not a dead end like the other two: stop the
                     # run right here (don't let the model spend another step
@@ -497,6 +524,17 @@ class AgentRunner:
                 "I reached my step limit for this turn. Here's where I stopped — ask me to continue "
                 "and I'll pick up from the last tool result."
             )
+
+        # Post-run reflection: persist a durable "what happened + what's next"
+        # so the next run (or a reconnect) starts with real context instead of
+        # a blank slate. This is the continual-learning half of the loop.
+        if self.memory is not None:
+            try:
+                self.memory.log_step("run.completed", detail=request[:120], result=final_text[:200])
+                if final_text and not self.memory.get_task_state().get("done"):
+                    pass  # keep task state; cleared explicitly by user/task tool
+            except Exception:
+                pass
 
         yield AgentEvent(
             "final",

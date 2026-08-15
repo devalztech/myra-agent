@@ -59,12 +59,40 @@ def screenshot_via_api(url: str, target: Path | None = None) -> dict[str, Any]:
 
 
 def _browser_available() -> bool:
+    """True only if a usable chromium BINARY is on disk (not just the package)."""
     try:
         from playwright.sync_api import sync_playwright  # noqa: F401
-
-        return True
     except Exception:
         return False
+    import glob
+    import os
+
+    # Look for an actual executable under the playwright browser cache. The
+    # `executable_path` API can return a phantom path for a build that was
+    # never downloaded, so we check for real binaries on disk instead.
+    home = os.path.expanduser("~")
+    patterns = [
+        f"{home}/.cache/ms-playwright/*/chrome-linux*/chrome",
+        f"{home}/.cache/ms-playwright/*/chrome-linux*/headless_shell",
+        f"{home}/.cache/ms-playwright/*/chromium-*/chrome-linux*/chrome",
+        f"{home}/.cache/ms-playwright/*/chromium_headless_shell-*/chrome-linux*/headless_shell",
+        f"{home}/.cache/ms-playwright/*/chrome-headless-shell-linux*/chrome-headless-shell",
+    ]
+    found = []
+    for pat in patterns:
+        for path in glob.glob(pat):
+            if os.path.exists(path) and os.path.isfile(path):
+                found.append(path)
+    if found:
+        # Require the binary to be a real, non-trivial executable file (not a
+        # leftover empty dir). ~150MB+ is a real chromium; anything tiny is a
+        # broken/failed download.
+        try:
+            big = [p for p in found if os.path.getsize(p) > 50_000_000]
+            return bool(big)
+        except OSError:
+            return True
+    return False
 
 
 @dataclass
@@ -305,12 +333,6 @@ def browser_action(
     if not _browser_available():
         return _chromium_fallback(action, url, screenshot=screenshot)
 
-    from .browser_setup import ensure_chromium
-
-    ok, message = ensure_chromium()
-    if not ok:
-        return _chromium_fallback(action, url, reason=message, screenshot=screenshot)
-
     try:
         return _manager.act(
             session_id,
@@ -321,14 +343,12 @@ def browser_action(
             screenshot=screenshot,
         )
     except Exception as exc:  # noqa: BLE001
-        # Browser binary missing, session crashed, etc — never crash the
-        # agent run over it. Drop the (possibly wedged) session so the next
-        # call gets a clean one instead of retrying a broken page forever.
+        # Browser binary missing/crashed at launch (e.g. playwright points at
+        # a headless_shell build that was never downloaded). Drop the wedged
+        # session and fall back to http_fetch / screenshot API so the agent
+        # run never hard-fails on browser issues.
         _manager.close(session_id)
-        return {
-            "error": f"Browser action failed: {type(exc).__name__}: {exc}",
-            "note": "The browser session was reset — try again.",
-        }
+        return _chromium_fallback(action, url, reason=str(exc), screenshot=screenshot)
 
 
 def close_session(session_id: str) -> None:

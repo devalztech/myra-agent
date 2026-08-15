@@ -9,6 +9,8 @@ still costs only a few hundred tokens.
 from __future__ import annotations
 
 import re
+import json
+import time
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -36,6 +38,74 @@ def _tokens(text: str) -> set[str]:
 class MemoryStore:
     db: Session
     user_id: str
+
+    # -- working / auto memory ----------------------------------------
+    TASK_STATE_KEY = "task.current"
+
+    def log_step(self, action: str, detail: str = "", *, result: str = "") -> Memory:
+        """Append a step to the persistent action log (kind='log').
+
+        Auto-called by the agent loop after every tool call so the full trail
+        of what myra did is saved — this is what lets it "know what it's doing"
+        and pick up cleanly after a reconnect or new session. Kept compact and
+        rotated so the log doesn't blow up the digest.
+        """
+        stamp = time.strftime("%Y-%m-%d %H:%M")
+        line = f"[{stamp}] {action}"
+        if detail:
+            line += f" {detail}"
+        if result:
+            line += f" -> {result[:200]}"
+        return self.remember(f"log.{int(time.time())}", line, kind="log")
+
+    def set_task_state(self, summary: str, *, goal: str = "", progress: str = "", next_step: str = "") -> Memory:
+        """Record what myra is currently working on and where it is.
+
+        A single durable 'current task' memory that the model sees in its
+        digest, so it always knows what it's doing, what's done, and what's
+        next — across sessions and reconnects.
+        """
+        value = json.dumps(
+            {"goal": goal, "progress": progress, "next": next_step, "summary": summary},
+            ensure_ascii=False,
+        )
+        return self.remember(self.TASK_STATE_KEY, value, kind="task_state")
+
+    def get_task_state(self) -> dict[str, str]:
+        """Return the current task state dict (empty if none)."""
+        entry = self.db.scalar(
+            select(Memory).where(Memory.user_id == self.user_id, Memory.key == self.TASK_STATE_KEY)
+        )
+        if entry is None or entry.deleted_at is not None:
+            return {}
+        try:
+            data = json.loads(entry.value)
+            return data if isinstance(data, dict) else {"summary": str(data)}
+        except (json.JSONDecodeError, TypeError):
+            return {"summary": entry.value}
+
+    def clear_task_state(self) -> None:
+        entry = self.db.scalar(
+            select(Memory).where(Memory.user_id == self.user_id, Memory.key == self.TASK_STATE_KEY)
+        )
+        if entry is not None:
+            entry.deleted_at = utcnow()
+            self.db.commit()
+
+    def recent_logs(self, limit: int = 6) -> list[str]:
+        """Most recent auto-log entries, newest first."""
+        rows = self.all()
+        logs = [m.value for m in rows if m.kind == "log"]
+        return logs[:limit]
+
+    def forget_logs(self) -> int:
+        """Soft-delete auto logs (keep durable prefs/conventions)."""
+        logs = [m for m in self.all() if m.kind == "log"]
+        for m in logs:
+            m.deleted_at = utcnow()
+        if logs:
+            self.db.commit()
+        return len(logs)
 
     # -- writes ---------------------------------------------------------
     def remember(self, key: str, value: str, kind: str = "preference") -> Memory:
@@ -157,6 +227,19 @@ class MemoryStore:
         if not entries:
             return ""
 
+        # Always surface the current task state first — this is the "what am I
+        # doing" anchor so myra knows where it is even after a reconnect.
+        task = self.get_task_state()
+        blocks: list[str] = []
+        if task:
+            summary = task.get("summary") or task.get("goal") or ""
+            state_lines = [f"  - Goal: {summary}"]
+            if task.get("progress"):
+                state_lines.append(f"  - Progress: {task['progress']}")
+            if task.get("next"):
+                state_lines.append(f"  - Next: {task['next']}")
+            blocks.append("Current task state:\n" + "\n".join(state_lines))
+
         rows = self.search(query, limit=limit) if query else []
         seen = {r["id"] for r in rows}
         for m in entries:
@@ -168,6 +251,18 @@ class MemoryStore:
             seen.add(m.id)
 
         if not rows:
-            return ""
-        lines = [f"- ({r['kind']}) {r['key']}: {r['value']}" for r in rows]
-        return "Known user preferences and project conventions:\n" + "\n".join(lines)
+            if not blocks:
+                return ""
+        # Only durable preferences/conventions belong in the "known" block;
+        # logs and task_state are surfaced separately above to avoid noise.
+        durable = [r for r in rows if r["kind"] not in ("log", "task_state")]
+        lines = [f"- ({r['kind']}) {r['key']}: {r['value']}" for r in durable]
+        if lines:
+            blocks.append("Known preferences & conventions:\n" + "\n".join(lines))
+
+        # Include a short tail of what myra has been doing recently.
+        logs = self.recent_logs(limit=4)
+        if logs:
+            blocks.append("Recent actions:\n" + "\n".join(f"  - {log}" for log in reversed(logs)))
+
+        return "\n\n".join(block for block in blocks if block)

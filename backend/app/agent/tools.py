@@ -898,6 +898,12 @@ def _screenshot_file(source: Path, target: Path) -> None:
     label="Taking screenshot",
 )
 def screenshot_file(path: str) -> dict[str, Any]:
+    # If the model passed a URL instead of a local file path, route it to the
+    # screenshot API (real rendered image) rather than failing.
+    if path.startswith(("http://", "https://")):
+        from ..services.browser import screenshot_via_api
+
+        return screenshot_via_api(path)
     file = safe_path(path, must_exist=True)
     target = file.with_suffix(".png")
     _screenshot_file(file, target)
@@ -971,6 +977,42 @@ def forget(key: str, _memory=None) -> str:
 
 
 @tool(
+    "update_task",
+    "Record the task you are currently working on: its goal, what you've done "
+    "so far, and what's next. This persists across runs so you never lose your "
+    "place. Call it at the start of a multi-step task and update it as you "
+    "make progress, then clear it when the task is fully complete.",
+    _obj(
+        {
+            "summary": _str("One-line summary of the task."),
+            "goal": _str("Optional: the end goal."),
+            "progress": _str("Optional: what you've already done."),
+            "next_step": _str("Optional: the very next thing you will do."),
+            "clear": {"type": "boolean", "description": "Set true to mark the task done and clear state."},
+        },
+        ["summary"],
+    ),
+    label="Tracking task",
+    mutates=True,
+)
+def update_task(
+    summary: str,
+    goal: str = "",
+    progress: str = "",
+    next_step: str = "",
+    clear: bool = False,
+    _memory=None,
+) -> str:
+    if _memory is None:
+        raise RuntimeError("Memory store unavailable.")
+    if clear:
+        _memory.clear_task_state()
+        return "Task marked complete and cleared from state."
+    _memory.set_task_state(summary, goal=goal, progress=progress, next_step=next_step)
+    return f"Task state updated: {summary}"
+
+
+@tool(
     "get_skill",
     "Load Myra's built-in skill sheet for a language or framework (javascript, typescript, react, node, express, postgresql, sqlite, python, cpp, html, css).",
     _obj({"name": _str("Skill name.")}, ["name"]),
@@ -1005,7 +1047,7 @@ def call_tool(
     if tool_def is None:
         raise KeyError(f"Unknown tool: {name}")
     kwargs = dict(arguments or {})
-    if name in {"remember", "recall", "forget"}:
+    if name in {"remember", "recall", "forget", "update_task"}:
         kwargs["_memory"] = memory
     if name == "browser":
         # Keys the persistent browser session so a login/click/read sequence
