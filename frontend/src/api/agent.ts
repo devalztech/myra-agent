@@ -44,6 +44,35 @@ export function fetchSessionEvents(
   );
 }
 
+// ---------------------------------------------------------------------------
+// preview (hosted static sites)
+// ---------------------------------------------------------------------------
+
+export function startPreview(
+  token: string,
+  path: string,
+  command?: string,
+): Promise<{ started?: string; port?: number; running?: boolean; error?: string }> {
+  return apiRequest("/preview/start", { method: "POST", token, body: { path, command } });
+}
+
+export function stopPreview(token: string, path: string): Promise<{ stopped?: boolean; error?: string }> {
+  return apiRequest("/preview/stop", { method: "POST", token, body: { path } });
+}
+
+export function previewHealth(
+  token: string,
+  path: string,
+): Promise<{ ok: boolean; running: boolean; port?: number; error?: string }> {
+  return apiRequest(`/preview/health?path=${encodeURIComponent(path)}`, { token });
+}
+
+/** The public URL a user can render in an iframe to preview a hosted dir. */
+export function previewIframeUrl(path: string): string {
+  const dir = path.replace(/^\/+|\/+$/g, "");
+  return `${API_URL}/preview/serve/${encodeURIComponent(dir)}`;
+}
+
 /**
  * Explicit stop, distinct from just aborting the fetch. A dropped
  * connection alone no longer halts a run server-side (it finishes

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+import socket
 import shutil
 import signal
 import subprocess
@@ -44,22 +45,30 @@ class Preview:
     def poll_log(self, seconds: float = 4.0) -> str:
         if self.proc is None:
             return ""
+        import select
+
         end = time.time() + seconds
         while time.time() < end:
-            if self.proc.stdout:
-                line = self.proc.stdout.readline()
-                if line:
-                    self.log.append(line.rstrip())
-                    if len(self.log) > 200:
-                        self.log = self.log[-200:]
-                    yield line.rstrip()
-            elif self.proc.poll() is not None:
+            if self.proc.stdout is None or self.proc.poll() is not None:
                 break
-        # no more output right now
+            ready, _, _ = select.select([self.proc.stdout], [], [], 0.2)
+            if not ready:
+                continue
+            line = self.proc.stdout.readline()
+            if not line:
+                break
+            self.log.append(line.rstrip())
+            if len(self.log) > 200:
+                self.log = self.log[-200:]
+            yield line.rstrip()
 
     def detect_port(self) -> int:
         for line in self.log:
             m = re.search(r"localhost[:/](\d+)", line)
+            if m:
+                self.port = int(m.group(1))
+                return self.port
+            m = re.search(r"port (\d+)", line)
             if m:
                 self.port = int(m.group(1))
                 return self.port
@@ -91,7 +100,13 @@ def detect_command(cwd: Path) -> list[str]:
         return ["python", "manage.py", "runserver", "0.0.0.0:8000"]
     if (cwd / "main.py").exists():
         return ["python", "main.py"]
-    return ["python3", "-m", "http.server", "8000"]
+    return ["python3", "-m", "http.server", str(_free_port())]
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 def available() -> bool:
@@ -107,6 +122,11 @@ def start(cwd: Path) -> dict[str, Any]:
     if key in _RUNNING and _RUNNING[key].proc and _RUNNING[key].proc.poll() is None:
         return {"running": True, "pid": _RUNNING[key].proc.pid, "port": _RUNNING[key].port}
     p = Preview(cwd=cwd, cmd=detect_command(cwd))
+    if p.cmd and p.cmd[0] == "python3" and "-m" in p.cmd:
+        try:
+            p.port = int(p.cmd[p.cmd.index("-m") + 2])
+        except (ValueError, IndexError):
+            pass
     out = p.start()
     if "error" in out:
         return out

@@ -33,7 +33,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import init_db
 from app.routers import agent as agent_router
-from app.routers import auth, chat, sessions
+from app.routers import auth, chat, preview, sessions
 from app.scheduler import start_scheduler
 from app.watchdog import start_watchdog
 from app.workspace import workspace_root
@@ -287,6 +287,7 @@ app.include_router(auth.router)
 app.include_router(sessions.router)
 app.include_router(chat.router)
 app.include_router(agent_router.router)
+app.include_router(preview.router)
 
 
 @app.get("/health", tags=["health"])

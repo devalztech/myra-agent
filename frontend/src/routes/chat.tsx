@@ -34,9 +34,13 @@ import {
   fetchProviderConfigs,
   fetchProviders,
   fetchSessionEvents,
+  previewHealth,
+  previewIframeUrl,
   runAgent,
   saveProviderConfig as saveProviderConfigApi,
+  startPreview,
   stopAgent,
+  stopPreview,
   updateAgentSettings,
   uploadWorkspaceFile,
 } from "@/api/agent";
@@ -228,6 +232,10 @@ function ChatPage() {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [settings, setSettings] = useState<AgentSettings | null>(null);
   const [showApiKeys, setShowApiKeys] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
+  const [previewPath, setPreviewPath] = useState<string>("");
+  const [previewRunning, setPreviewRunning] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState<string>("");
   const [providerConfigs, setProviderConfigs] = useState<Record<string, { apiKey?: string | null; baseUrl?: string | null; model?: string | null; hasKey: boolean }>>({});
   const [notice, setNotice] = useState<string | null>(null);
   const [pendingApproval, setPendingApproval] = useState<{
@@ -443,6 +451,47 @@ function ChatPage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not save provider settings.");
     }
+  };
+
+  const openPreview = async () => {
+    setShowPreview((v) => !v);
+    if (!token) return;
+    try {
+      const h = await previewHealth(token, previewPath);
+      setPreviewRunning(Boolean(h.running));
+      if (h.running && previewPath) setPreviewUrl(previewIframeUrl(previewPath));
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const launchPreview = async () => {
+    if (!token) return;
+    const p = previewPath.trim();
+    if (!p) {
+      setError("Enter a workspace path to preview (e.g. site or landing).");
+      return;
+    }
+    try {
+      await startPreview(token, p);
+      setPreviewRunning(true);
+      setPreviewUrl(previewIframeUrl(p));
+      setNotice(`Preview started for ${p}.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not start preview.");
+    }
+  };
+
+  const closePreview = async () => {
+    if (!token || !previewPath) return;
+    try {
+      await stopPreview(token, previewPath.trim());
+    } catch {
+      /* ignore */
+    }
+    setPreviewRunning(false);
+    setPreviewUrl("");
+    setShowPreview(false);
   };
 
   const toggleAgentMode = async () => {
@@ -1072,6 +1121,18 @@ function ChatPage() {
 
                 <button
                   type="button"
+                  onClick={() => void openPreview()}
+                  className="focus-royal flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-[0.9375rem] transition-colors hover:bg-surface-raised"
+                >
+                  <FileText className="size-4 text-royal" />
+                  <span className="flex-1">Preview</span>
+                  <span className="text-[0.8125rem] text-muted-foreground">
+                    {previewRunning ? "Live" : ""}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
                   onClick={() => void openApiKeys()}
                   className="focus-royal flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-[0.9375rem] transition-colors hover:bg-surface-raised"
                 >
@@ -1443,6 +1504,73 @@ function ChatPage() {
                       </div>
                     );
                   })}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {showPreview && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+            <div className="flex h-[85vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-hairline bg-popover shadow-2xl">
+              <div className="flex items-center justify-between border-b border-hairline px-4 py-3">
+                <div className="flex items-center gap-2">
+                  <FileText className="size-4 text-royal" />
+                  <h2 className="text-sm font-semibold tracking-tight text-foreground">Preview</h2>
+                  {previewRunning && (
+                    <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[0.7rem] font-medium text-emerald-500">
+                      Live
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowPreview(false)}
+                  className="rounded-lg p-1.5 text-muted-foreground hover:text-foreground"
+                  aria-label="Close preview"
+                >
+                  <X className="size-5" />
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2 border-b border-hairline px-4 py-3">
+                <input
+                  value={previewPath}
+                  onChange={(e) => setPreviewPath(e.target.value)}
+                  placeholder="Workspace path to preview (e.g. site, landing)"
+                  className="w-full rounded-lg border border-hairline bg-surface px-3 py-2 text-[0.8125rem] text-foreground outline-none focus:border-royal/50"
+                />
+                <button
+                  type="button"
+                  onClick={() => void launchPreview()}
+                  disabled={!previewPath.trim()}
+                  className="shrink-0 rounded-lg bg-royal px-4 py-2 text-[0.8125rem] font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-40"
+                >
+                  Start
+                </button>
+                {previewRunning && (
+                  <button
+                    type="button"
+                    onClick={() => void closePreview()}
+                    className="shrink-0 rounded-lg bg-surface px-4 py-2 text-[0.8125rem] font-medium text-muted-foreground hover:text-foreground"
+                  >
+                    Stop
+                  </button>
+                )}
+              </div>
+
+              <div className="min-h-0 flex-1 bg-white">
+                {previewUrl ? (
+                  <iframe
+                    src={previewUrl}
+                    title="Preview"
+                    className="h-full w-full border-0"
+                    sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+                  />
+                ) : (
+                  <div className="flex h-full items-center justify-center p-8 text-center text-sm text-muted-foreground">
+                    Start a preview to see the hosted site here.
+                  </div>
+                )}
               </div>
             </div>
           </div>

@@ -27,7 +27,7 @@ logger = logging.getLogger("myra.browser_setup")
 
 # chromium (headless_shell) is roughly 130-150MB to download; give Playwright
 # room to unpack + cache without getting anywhere near a 14GB disk's edge.
-MIN_FREE_DISK_BYTES = 500 * 1024 * 1024  # 500MB headroom required
+MIN_FREE_DISK_BYTES = 150 * 1024 * 1024  # 150MB headroom required (3GB box)
 INSTALL_TIMEOUT_SECONDS = 240  # generous but bounded — a stuck download must not hang a tool call forever
 FAILURE_RETRY_SECONDS = 15 * 60  # don't hammer a broken install every call; retry at most every 15 min
 
@@ -101,18 +101,28 @@ def ensure_chromium() -> tuple[bool, str]:
                 "before trying again."
             )
 
-        logger.info("Chromium missing — attempting self-install (chromium only, no --with-deps)")
+        logger.info("Chromium missing — attempting self-install")
         try:
-            # No --with-deps: that installs apt system packages and needs
-            # root, which a Pterodactyl container doesn't have. Chromium's
-            # headless_shell variant runs fine on Debian slim images without
-            # the extra system libs --with-deps would pull in.
+            # Try --with-deps first: most Pterodactyl eggs run as root (or
+            # have passwordless apt) and the missing system libraries are the
+            # #1 reason chromium fails to LAUNCH even after the binary is
+            # downloaded. If root isn't available the first install errors out
+            # harmlessly and we fall back to a bare chromium install.
             proc = subprocess.run(
-                [sys.executable, "-m", "playwright", "install", "chromium"],
+                [sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"],
                 capture_output=True,
                 text=True,
                 timeout=INSTALL_TIMEOUT_SECONDS,
             )
+            if proc.returncode != 0:
+                logger.info("--with-deps failed (exit %s); retrying bare chromium install",
+                            proc.returncode)
+                proc = subprocess.run(
+                    [sys.executable, "-m", "playwright", "install", "chromium"],
+                    capture_output=True,
+                    text=True,
+                    timeout=INSTALL_TIMEOUT_SECONDS,
+                )
         except subprocess.TimeoutExpired:
             _last_result = "install timed out"
             return False, (

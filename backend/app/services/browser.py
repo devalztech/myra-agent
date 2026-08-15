@@ -18,6 +18,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -29,6 +31,31 @@ IDLE_TIMEOUT = 10 * 60  # close a session's browser after 10 min of no calls
 NAV_TIMEOUT_MS = 45_000
 ACTION_TIMEOUT_MS = 15_000
 MAX_TEXT_CHARS = 12_000  # matches agent.guardrails.truncate's default cap
+
+# External screenshot service used as a fallback when chromium can't be
+# installed/run on a small sandbox (no root, low disk). Lets myra still hand
+# the user a real rendered screenshot of any public URL even without a local
+# browser binary.
+SCREENSHOT_API = "https://eliteprotech-apis.zone.id/ssweb"
+
+
+def screenshot_via_api(url: str, target: Path | None = None) -> dict[str, Any]:
+    """Screenshot a URL through the external API, saving to workspace if target given."""
+    api_url = f"{SCREENSHOT_API}?url={urllib.parse.quote(url)}"
+    req = urllib.request.Request(
+        api_url,
+        headers={
+            "accept": "*/*",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = resp.read()
+    if target is None:
+        target = workspace_root() / ".myra" / "screenshots" / f"ss-{int(time.time())}.png"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
+    return {"screenshot": relative(target), "engine": "api", "bytes": len(data)}
 
 
 def _browser_available() -> bool:
@@ -111,7 +138,15 @@ class BrowserManager:
             from playwright.sync_api import sync_playwright  # noqa: PLC0415
 
             pw = sync_playwright().start()
-            browser = pw.chromium.launch(headless=True, args=["--no-sandbox"])
+            browser = pw.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--no-first-run",
+                ],
+            )
             context = browser.new_context(viewport={"width": 1280, "height": 900})
             context.set_default_timeout(ACTION_TIMEOUT_MS)
             page = context.new_page()
@@ -268,17 +303,13 @@ def browser_action(
     its own private incognito browser.
     """
     if not _browser_available():
-        return {
-            "error": "Playwright package is not installed (this needs a Python dependency "
-            "change, not something a tool call can fix — ask the user to add `playwright` "
-            "to requirements.txt)."
-        }
+        return _chromium_fallback(action, url, screenshot=screenshot)
 
     from .browser_setup import ensure_chromium
 
     ok, message = ensure_chromium()
     if not ok:
-        return {"error": f"Browser unavailable: {message}"}
+        return _chromium_fallback(action, url, reason=message, screenshot=screenshot)
 
     try:
         return _manager.act(
@@ -302,3 +333,46 @@ def browser_action(
 
 def close_session(session_id: str) -> None:
     _manager.close(session_id)
+
+
+def _chromium_fallback(
+    action: str, url: str | None, reason: str = "", screenshot: bool = False
+) -> dict[str, Any]:
+    """Graceful degradation when chromium can't run on this sandbox.
+
+    The box is small (no root for `--with-deps`, often low free disk), so
+    chromium genuinely can't always be installed. Rather than fail the whole
+    run, fall back to an external screenshot API when a screenshot was asked
+    for, else fetch the page's text over plain HTTP for the `open` action.
+    Other actions still fail cleanly with a reason.
+    """
+    if screenshot and url:
+        # User explicitly wants a rendered image — use the external service
+        # even without a local browser.
+        try:
+            return screenshot_via_api(url)
+        except Exception as exc:  # noqa: BLE001
+            return {"error": f"External screenshot failed: {exc}", "engine": "api"}
+    if action == "open" and url:
+        try:
+            from ..agent.tools import http_fetch
+
+            result = http_fetch(url)
+            result["engine"] = "http"
+            result["note"] = (
+                "Chromium is not available on this box (no root / low disk), so this "
+                "page was fetched as plain HTML text instead of a rendered browser. "
+                "You can read/analyze it but cannot click, type, or screenshot."
+            )
+            if reason:
+                result["chromiumReason"] = reason
+            return result
+        except Exception as exc:  # noqa: BLE001
+            return {"error": f"Page fetch failed: {exc}"}
+    return {
+        "error": (
+            "Browser unavailable: "
+            + (reason or "Playwright/chromium is not installed and can't be on this sandbox")
+            + ". Action requires a real browser and was not run."
+        )
+    }
