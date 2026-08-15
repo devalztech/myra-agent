@@ -2,6 +2,8 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import {
   CheckCheck,
   ChevronRight,
+  ClipboardCheck,
+  Copy,
   Cpu,
   FileText,
   Loader2,
@@ -86,12 +88,6 @@ export const Route = createFileRoute("/chat")({
   }),
   component: ChatPage,
 });
-
-function clock(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-}
 
 /** Which lucide icon a step gets is driven by this, not by success/failure. */
 const TOOL_KIND: Record<string, ActivityStep["kind"]> = {
@@ -251,6 +247,7 @@ function ChatPage() {
   const [stopping, setStopping] = useState(false);
   const [attachedPath, setAttachedPath] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
   // A send that failed before any events came back (e.g. offline, tunnel
   // down). Instead of dumping the text back into the input box — which
   // silently discards it the moment the user types anything else, and gives
@@ -570,6 +567,25 @@ function ChatPage() {
     setPendingRetry(null);
     setError(null);
   }, []);
+
+  const copyMessage = useCallback((id: string, text: string) => {
+    try {
+      void navigator.clipboard.writeText(text);
+      setCopiedId(id);
+      setTimeout(() => setCopiedId((cur) => (cur === id ? null : cur)), 1500);
+    } catch {
+      /* ignore clipboard failures */
+    }
+  }, []);
+
+  const retryMessage = useCallback(
+    (content: string) => {
+      if (!activeId) return;
+      setDraft(content);
+      void send(undefined, { overrideContent: content, isRetry: true, targetSessionId: activeId });
+    },
+    [activeId], // eslint-disable-line react-hooks/exhaustive-deps
+  );
 
   const send = async (
     event?: FormEvent,
@@ -1185,14 +1201,32 @@ function ChatPage() {
                 {messages.map((message) =>
                   message.role === "user" ? (
                     <li key={message.id} className="flex min-w-0 justify-end">
-                      <div className="max-w-[85%] min-w-0 rounded-2xl bg-bubble-user px-4 py-3 sm:max-w-[75%]">
-                        <p className="text-[0.9375rem] leading-[1.6] break-words whitespace-pre-wrap text-bubble-user-foreground">
+                      <div className="max-w-[85%] min-w-0 rounded-md bg-bubble-user px-3 py-1.5 sm:max-w-[75%]">
+                        <p className="text-[0.9375rem] leading-[1.45] break-words whitespace-pre-wrap text-bubble-user-foreground">
                           {message.content}
                         </p>
-                        <p className="mt-1 flex items-center justify-end gap-1.5 text-[0.7rem] text-bubble-user-foreground/60">
-                          {clock(message.createdAt)}
-                          <CheckCheck className="size-3.5 text-royal-soft" />
-                        </p>
+                        <div className="mt-0.5 flex items-center justify-end gap-0.5">
+                          <button
+                            type="button"
+                            aria-label="Copy message"
+                            onClick={() => copyMessage(message.id, message.content)}
+                            className="rounded p-0.5 text-bubble-user-foreground/50 transition-colors hover:text-bubble-user-foreground"
+                          >
+                            {copiedId === message.id ? (
+                              <ClipboardCheck className="size-3.5" />
+                            ) : (
+                              <Copy className="size-3.5" />
+                            )}
+                          </button>
+                          <button
+                            type="button"
+                            aria-label="Retry message"
+                            onClick={() => retryMessage(message.content)}
+                            className="rounded p-0.5 text-bubble-user-foreground/50 transition-colors hover:text-bubble-user-foreground"
+                          >
+                            <RotateCw className="size-3.5" />
+                          </button>
+                        </div>
                       </div>
                     </li>
                   ) : (
@@ -1205,15 +1239,34 @@ function ChatPage() {
                             running={false}
                           />
                         ) : null}
-                        <div className="max-w-full min-w-0 rounded-2xl bg-bubble-agent px-4 py-3">
+                        <div className="max-w-full min-w-0 rounded-md bg-bubble-agent px-3 py-1.5">
                           <Markdown
                             content={message.content}
                             className="text-bubble-agent-foreground"
                             token={token}
                           />
-                          <p className="mt-1.5 text-[0.7rem] text-muted-foreground">
-                            {clock(message.createdAt)}
-                          </p>
+                          <div className="mt-0.5 flex items-center justify-end gap-0.5">
+                            <button
+                              type="button"
+                              aria-label="Copy message"
+                              onClick={() => copyMessage(message.id, message.content)}
+                              className="rounded p-0.5 text-muted-foreground/70 transition-colors hover:text-foreground"
+                            >
+                              {copiedId === message.id ? (
+                                <ClipboardCheck className="size-3.5" />
+                              ) : (
+                                <Copy className="size-3.5" />
+                              )}
+                            </button>
+                            <button
+                              type="button"
+                              aria-label="Retry message"
+                              onClick={() => retryMessage(message.content)}
+                              className="rounded p-0.5 text-muted-foreground/70 transition-colors hover:text-foreground"
+                            >
+                              <RotateCw className="size-3.5" />
+                            </button>
+                          </div>
                         </div>
                       </div>
                     </li>
@@ -1228,7 +1281,7 @@ function ChatPage() {
                         <ActivityTimeline steps={liveSteps} running={sending && !stopping} />
                       )}
                       {streaming ? (
-                        <div className="rounded-2xl bg-bubble-agent px-4 py-3">
+                        <div className="rounded-md bg-bubble-agent px-3 py-1.5">
                           <Markdown
                             content={streaming}
                             className="text-bubble-agent-foreground"
@@ -1441,9 +1494,7 @@ function ChatPage() {
               </p>
 
               <div className="space-y-4">
-                {providers
-                  .filter((p) => p.kind !== "mock")
-                  .map((provider) => {
+                {providers.map((provider) => {
                     const cfg = providerConfigs[provider.id] ?? {};
                     return (
                       <div

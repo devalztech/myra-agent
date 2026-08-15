@@ -302,15 +302,9 @@ class AgentRunner:
                 continue
             seen.add(pid)
             chain.append(p)
-        # Mock as the absolute last resort so a totally offline run still
-        # returns *something* instead of erroring out (test/offline mode).
-        if self.provider.id != "mock":
-            try:
-                mock = get_provider("mock")
-                if getattr(mock, "available", True):
-                    chain.append(mock)
-            except Exception:
-                pass
+        # Never fall back to mock. If every real provider fails, surface a
+        # clear error so the user knows their API is down — no fake canned
+        # output that looks like a real answer.
         return chain
 
     def _complete_with_failover(

@@ -1,11 +1,9 @@
-"""Multiple AI providers, switchable from the Myra UI.
+"""Multiple remote AI providers, switchable from the Myra UI.
 
-* ``local``  — llama.cpp GGUF inference in-process (default, no network).
-* ``agnes``  — Agnes AI over an OpenAI-compatible chat-completions endpoint.
-* ``mock``   — deterministic, used by tests and by cold environments.
-
-All providers expose the same tiny surface: ``stream(messages) -> Iterator[str]``
-and ``complete(messages) -> str``, so the agent loop is provider-agnostic.
+All remote-only now (no local model, no mock). Providers expose the same tiny
+surface: ``stream(messages) -> Iterator[str]`` and ``complete(messages) -> str``,
+so the agent loop is provider-agnostic. If every provider fails, the agent
+surfaces a clear error instead of returning a canned/mocked reply.
 """
 
 from __future__ import annotations
@@ -30,7 +28,7 @@ Message = dict[str, str]
 class ProviderInfo:
     id: str
     name: str
-    kind: str  # local | remote | mock
+    kind: str  # local | remote
     model: str | None
     available: bool
     detail: str | None = None
@@ -78,21 +76,6 @@ class BaseProvider:
 
     def complete(self, messages: list[Message]) -> str:
         return "".join(self.stream(messages))
-
-
-class MockProvider(BaseProvider):
-    id = "mock"
-    name = "Mock (offline)"
-    kind = "mock"
-
-    @property
-    def model(self) -> str | None:
-        return "myra-mock"
-
-    def stream(self, messages: list[Message]) -> Iterator[str]:
-        last = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
-        for chunk in f"[myra:mock] {last.strip()}".split(" "):
-            yield chunk + " "
 
 
 class GeminiProvider(BaseProvider):
@@ -531,7 +514,6 @@ _PROVIDERS: dict[str, BaseProvider] = {
     SambaNovaProvider.id: SambaNovaProvider(),
     ScalewayProvider.id: ScalewayProvider(),
     PollinationsProvider.id: PollinationsProvider(),
-    MockProvider.id: MockProvider(),
 }
 
 
@@ -540,11 +522,7 @@ def list_providers() -> list[dict[str, object]]:
 
 
 def get_provider(provider_id: str | None = None) -> BaseProvider:
-    key = (provider_id or settings.default_provider or "mock").lower()
+    key = (provider_id or settings.default_provider or "groq").lower()
     if key not in _PROVIDERS:
-        # Unknown provider -> fall back to mock so the app never hard-fails.
-        key = "mock"
-    provider = _PROVIDERS.get(key)
-    if provider is None:
         raise LLMUnavailable(f"Unknown provider '{provider_id}'.")
-    return provider
+    return _PROVIDERS[key]

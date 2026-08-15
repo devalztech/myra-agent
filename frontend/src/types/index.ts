@@ -68,7 +68,7 @@ export type ModelStatus = {
 export type ProviderInfo = {
   id: string;
   name: string;
-  kind: "local" | "remote" | "mock" | string;
+  kind: "local" | "remote" | string;
   model: string | null;
   available: boolean;
   detail: string | null;
