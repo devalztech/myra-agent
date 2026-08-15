@@ -10,6 +10,7 @@ import {
   MoreVertical,
   Paperclip,
   Plus,
+  RotateCw,
   SendHorizontal,
   ShieldCheck,
   Square,
@@ -242,6 +243,22 @@ function ChatPage() {
   const [stopping, setStopping] = useState(false);
   const [attachedPath, setAttachedPath] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  // A send that failed before any events came back (e.g. offline, tunnel
+  // down). Instead of dumping the text back into the input box — which
+  // silently discards it the moment the user types anything else, and gives
+  // no indication a retry is even possible — the failed message is held
+  // here and offered back as an explicit "Retry" action.
+  const [pendingRetry, setPendingRetry] = useState<{ content: string } | null>(null);
+  const [autoRetrying, setAutoRetrying] = useState(false);
+  const autoRetryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Clear a pending auto-retry timer on unmount so it can't fire send()
+  // against an unmounted chat view.
+  useEffect(() => {
+    return () => {
+      if (autoRetryRef.current) clearTimeout(autoRetryRef.current);
+    };
+  }, []);
 
   // --- guard ------------------------------------------------------------
   useEffect(() => {
@@ -306,6 +323,16 @@ function ChatPage() {
 
   // --- active conversation + its recorded agent steps -------------------
   useEffect(() => {
+    // A pending retry (or an in-flight auto-retry timer) belongs to the
+    // session it failed in — don't carry it across when the user switches
+    // conversations, or a stale "Retry" pill could resend into the wrong
+    // session.
+    if (autoRetryRef.current) {
+      clearTimeout(autoRetryRef.current);
+      autoRetryRef.current = null;
+    }
+    setAutoRetrying(false);
+    setPendingRetry(null);
     if (!token || !activeId) {
       setMessages([]);
       setStepsByMessage({});
@@ -436,9 +463,73 @@ function ChatPage() {
     }
   };
 
+  // Whether the run got far enough that the backend actually started work
+  // (so it's still going in the background and reconnect/poll is the right
+  // move) versus never reaching the server at all (so a manual retry is the
+  // right move — there's nothing running to reconnect to).
+  const gotAnyEvent = (steps: ActivityStep[], text: string) => steps.length > 0 || text.length > 0;
+
+  // Auto-retries a failed send once, 15s after the failure, before falling
+  // back to asking the user to tap Retry. Mirrors the "prompt-level" timer:
+  // a short, bounded, automatic reconnect attempt for the single message,
+  // distinct from the "session-level" reconnect pollForCompletion() does
+  // (which runs indefinitely once a run is actually in flight server-side).
+  const scheduleAutoRetry = useCallback(
+    (sessionId: string, content: string, options?: { approved?: boolean }) => {
+      if (autoRetryRef.current) clearTimeout(autoRetryRef.current);
+      setAutoRetrying(true);
+      autoRetryRef.current = setTimeout(() => {
+        setAutoRetrying(false);
+        autoRetryRef.current = null;
+        // Only auto-retry if the user hasn't already retried/edited/sent
+        // something else in the meantime.
+        setPendingRetry((current) => {
+          if (current?.content !== content) return current;
+          void send(undefined, {
+            approved: options?.approved,
+            overrideContent: content,
+            isRetry: true,
+            targetSessionId: sessionId,
+          });
+          return current;
+        });
+      }, 15_000);
+    },
+    [], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+
+  const retryNow = useCallback(() => {
+    if (!pendingRetry || !activeId) return;
+    if (autoRetryRef.current) {
+      clearTimeout(autoRetryRef.current);
+      autoRetryRef.current = null;
+    }
+    setAutoRetrying(false);
+    void send(undefined, {
+      overrideContent: pendingRetry.content,
+      isRetry: true,
+      targetSessionId: activeId,
+    });
+  }, [pendingRetry, activeId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const dismissRetry = useCallback(() => {
+    if (autoRetryRef.current) {
+      clearTimeout(autoRetryRef.current);
+      autoRetryRef.current = null;
+    }
+    setAutoRetrying(false);
+    setPendingRetry(null);
+    setError(null);
+  }, []);
+
   const send = async (
     event?: FormEvent,
-    options?: { approved?: boolean; overrideContent?: string },
+    options?: {
+      approved?: boolean;
+      overrideContent?: string;
+      isRetry?: boolean;
+      targetSessionId?: string;
+    },
   ) => {
     event?.preventDefault();
     let content = (options?.overrideContent ?? draft).trim();
@@ -449,7 +540,11 @@ function ChatPage() {
 
     setError(null);
     setNotice(null);
-    if (!options?.overrideContent) setDraft("");
+    if (options?.isRetry) {
+      setPendingRetry(null);
+    } else {
+      setDraft("");
+    }
     setSending(true);
     setStopping(false);
     setStreaming("");
@@ -462,7 +557,7 @@ function ChatPage() {
     let capturedSteps: ActivityStep[] = [];
     let capturedText = "";
 
-    let sessionId = activeId;
+    let sessionId = options?.targetSessionId ?? activeId;
     try {
       if (!sessionId) {
         const created = await createSession(token);
@@ -474,7 +569,7 @@ function ChatPage() {
         setActiveId(created.id);
       }
 
-      if (!options?.approved) {
+      if (!options?.approved && !options?.isRetry) {
         setMessages((prev) => [
           ...prev,
           {
@@ -567,7 +662,13 @@ function ChatPage() {
     } catch (err) {
       if (controller.signal.aborted) {
         setNotice("Stopped.");
-        if (!options?.overrideContent) setDraft(content);
+        // Restore the text to the input on a deliberate stop so nothing is
+        // lost. Only for genuinely user-authored text: a fresh message, or
+        // a stopped retry (which also carries overrideContent and used to
+        // be excluded here by mistake, silently dropping the text). An
+        // approval-continue resend isn't new user-authored text — it's the
+        // original message replaying — so it's still excluded.
+        if (!options?.overrideContent || options?.isRetry) setDraft(content);
         // Keep whatever Myra had done so far visible as a finished (not
         // "running") record instead of wiping it — stopping shouldn't hide
         // the steps that already happened.
@@ -589,14 +690,31 @@ function ChatPage() {
           ]);
           setStepsByMessage((prev) => ({ ...prev, [stoppedId]: frozen }));
         }
+      } else if (gotAnyEvent(capturedSteps, capturedText)) {
+        // The run actually started server-side (we saw at least one event)
+        // before the connection dropped — the backend keeps it going, so
+        // there's nothing to "retry": resync and keep polling until it
+        // finishes, same as before.
+        setError(err instanceof Error ? err.message : "Connection lost. Reconnecting…");
+        void resyncSession().then(() => pollForCompletion(controller));
       } else {
-        setError(err instanceof Error ? err.message : "Message failed to send.");
-        if (!options?.overrideContent) setDraft(content);
-        // Connection dropped: the backend keeps the agent working. Resync
-        // immediately to pull back whatever happened while we were offline,
-        // then keep polling /events so the in-progress steps stay live until
-        // the run actually finishes.
-        void resyncSession().then(() => pollForCompletion());
+        // The send never even reached the backend (e.g. offline before the
+        // first byte came back). Nothing is running server-side, so silently
+        // resyncing/polling would just spin forever. Hold the message and
+        // offer an explicit retry instead of quietly dropping it into the
+        // input box, where it's easy to lose the moment the user types
+        // anything else. Applies whether this was the original send or a
+        // previous retry that failed again — either way there's still
+        // nothing running server-side to reconnect to.
+        if (!options?.approved) {
+          setPendingRetry({ content });
+          // Only auto-retry once: if this attempt was itself an auto/manual
+          // retry and it failed again, stop looping silently and leave it
+          // on the explicit Retry button so a bad connection can't retry
+          // forever unattended.
+          if (!options?.isRetry && sessionId) scheduleAutoRetry(sessionId, content, options);
+        }
+        setError(err instanceof Error ? err.message : "Couldn't reach Myra.");
       }
     } finally {
       setStreaming("");
@@ -701,13 +819,30 @@ function ChatPage() {
   // After a mid-run disconnect the backend keeps working. Poll /events until
   // the run finishes so the UI stays live (steps keep updating in real time)
   // instead of freezing on the last frame we saw before the drop.
-  const pollForCompletion = useCallback(async () => {
+  //
+  // This is the "session-level" reconnect: unlike the single failed-send
+  // retry above (one 15s auto-attempt, then a manual Retry button), a run
+  // that's already in flight server-side has no "give up" state that makes
+  // sense — the agent is working whether or not this tab can currently
+  // reach it. So a transient poll failure (tunnel bounce, brief network
+  // drop) backs off and keeps trying rather than abandoning the run's live
+  // view after a single bad request; only an explicit stop or the run
+  // actually finishing ends the loop.
+  const pollForCompletion = useCallback(async (runController: AbortController) => {
     if (!token || !activeId) return;
-    for (let i = 0; i < 600; i += 1) {
-      // Bail if the user started a new run or left the session.
-      if (abortRef.current?.signal.aborted) return;
+    let consecutiveFailures = 0;
+    for (;;) {
+      // Bail if the user started a new run or left the session. Checks the
+      // controller captured when THIS poll started, not the shared
+      // abortRef — that ref gets reassigned to a fresh (unaborted)
+      // controller the moment any new send() begins, which would otherwise
+      // make an old poll loop mistake a brand new run for "still mine" and
+      // never stop.
+      if (runController.signal.aborted) return;
       try {
         const { events } = await fetchSessionEvents(token, activeId);
+        consecutiveFailures = 0;
+        setNotice(null);
         let live: ActivityStep[] = [];
         const grouped: Record<string, ActivityStep[]> = {};
         for (const event of events) {
@@ -725,9 +860,21 @@ function ChatPage() {
           return;
         }
       } catch {
-        return; // backend unreachable — stop polling
+        consecutiveFailures += 1;
+        // Let the user know reconnection is still happening rather than
+        // silently retrying forever with no feedback — but only after a
+        // couple of misses, so one blip doesn't flash a message.
+        if (consecutiveFailures >= 2) {
+          setNotice("Reconnecting to Myra…");
+        }
       }
-      await new Promise((r) => setTimeout(r, 3000));
+      if (runController.signal.aborted) return;
+      // 20s ceiling on the backoff between reconnect attempts: quick at
+      // first (3s, matching the healthy-poll cadence), then widening so a
+      // sustained outage doesn't hammer the backend, capped so it never
+      // waits so long the UI feels stuck.
+      const delayMs = consecutiveFailures === 0 ? 3000 : Math.min(20_000, 3000 * 2 ** consecutiveFailures);
+      await new Promise((r) => setTimeout(r, delayMs));
     }
   }, [token, activeId]);
 
@@ -1041,16 +1188,48 @@ function ChatPage() {
               </ul>
             )}
 
-            {(error || notice) && (
-              <p
-                role={error ? "alert" : "status"}
-                className={cn(
-                  "mt-5 rounded-xl bg-surface px-4 py-2.5 text-[0.875rem]",
-                  error ? "text-destructive" : "text-muted-foreground",
-                )}
+            {pendingRetry ? (
+              <div
+                role="alert"
+                className="mt-5 flex items-center justify-between gap-3 rounded-xl bg-surface px-4 py-2.5 text-[0.875rem]"
               >
-                {error ?? notice}
-              </p>
+                <span className="text-destructive">
+                  {error ?? "Couldn't reach Myra."}
+                  {autoRetrying && (
+                    <span className="text-muted-foreground"> — retrying automatically…</span>
+                  )}
+                </span>
+                <span className="flex shrink-0 items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={retryNow}
+                    className="flex items-center gap-1.5 rounded-lg bg-foreground/10 px-2.5 py-1.5 text-foreground transition hover:bg-foreground/15"
+                  >
+                    <RotateCw className={cn("size-3.5", autoRetrying && "animate-spin")} />
+                    Retry
+                  </button>
+                  <button
+                    type="button"
+                    onClick={dismissRetry}
+                    aria-label="Dismiss"
+                    className="rounded-lg p-1.5 text-muted-foreground transition hover:bg-foreground/10 hover:text-foreground"
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                </span>
+              </div>
+            ) : (
+              (error || notice) && (
+                <p
+                  role={error ? "alert" : "status"}
+                  className={cn(
+                    "mt-5 rounded-xl bg-surface px-4 py-2.5 text-[0.875rem]",
+                    error ? "text-destructive" : "text-muted-foreground",
+                  )}
+                >
+                  {error ?? notice}
+                </p>
+              )
             )}
 
             {pendingApproval && !sending && (

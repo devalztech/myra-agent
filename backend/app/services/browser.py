@@ -269,9 +269,17 @@ def browser_action(
     """
     if not _browser_available():
         return {
-            "error": "Playwright is not installed. Install it with: "
-            "pip install playwright && playwright install chromium"
+            "error": "Playwright package is not installed (this needs a Python dependency "
+            "change, not something a tool call can fix — ask the user to add `playwright` "
+            "to requirements.txt)."
         }
+
+    from .browser_setup import ensure_chromium
+
+    ok, message = ensure_chromium()
+    if not ok:
+        return {"error": f"Browser unavailable: {message}"}
+
     try:
         return _manager.act(
             session_id,

@@ -863,8 +863,16 @@ def _screenshot_file(source: Path, target: Path) -> None:
         from playwright.sync_api import sync_playwright  # type: ignore
     except Exception as exc:  # pragma: no cover - optional dependency
         raise CommandBlocked(
-            "Playwright is not installed. Install it with: pip install playwright && playwright install chromium"
+            "Playwright package is not installed (this needs a Python dependency change, "
+            "not something a tool call can fix — ask the user to add `playwright` to "
+            "requirements.txt)."
         ) from exc
+
+    from ..services.browser_setup import ensure_chromium
+
+    ok, message = ensure_chromium()
+    if not ok:
+        raise CommandBlocked(f"Screenshot unavailable: {message}")
 
     target.parent.mkdir(parents=True, exist_ok=True)
     file_url = source.resolve().as_uri()
